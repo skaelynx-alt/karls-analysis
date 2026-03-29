@@ -1,0 +1,961 @@
+---
+title: "karls_data"
+author: "Kailin"
+date: "2026-03-12"
+output: html_document
+---
+
+```{r clean, include=FALSE}
+rm(list = ls())
+gc()
+```
+
+The R packages listed each have their own specific functions:
+
+-   `skimr` — Generates a data summary (means, quantiles, missing rate, etc.) with a single command; much more visually appealing than `summary()`
+-   `inspectdf` — examines data grouped by column type, making it ideal for quickly assessing the overall structure of a data frame
+-   `naniar` — specialises in handling and visualising missing values (distribution and patterns of NAs)
+-   `corrplot` — plots correlation matrix heatmaps to visualise correlations between continuous variables
+-   `tableone` / `Table1` — generates the "Table 1" descriptive statistics table commonly found in academic papers, comparing the distribution of variables across groups
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+pacman::p_load(tidyverse, readxl, here, skimr, inspectdf, naniar, corrplot, tableone, patchwork, scales)
+```
+
+```{r pptsetup, include=FALSE}
+# Shared themes & colours (PPT optimisation: large font, white background, no unnecessary grid lines)
+theme_ppt <- theme_bw(base_size = 16) +
+  theme(
+    plot.title       = element_text(face = "bold", size = 18),
+    plot.subtitle    = element_text(size = 13, colour = "grey40"),
+    legend.position  = "bottom",
+    legend.title     = element_text(size = 13),
+    legend.text      = element_text(size = 12),
+    axis.title       = element_text(size = 14),
+    axis.text        = element_text(size = 13),
+    panel.grid.minor = element_blank(),
+    strip.text       = element_text(face = "bold", size = 13)
+  )
+
+trt_colours <- c(A = "#0D7680", B = "#E8A838", C = "#A06030")
+
+# Function to save images (to ../figs/, in 16:9 PowerPoint aspect ratio)
+save_ppt_fig <- function(filename, width = 10, height = 6) {
+  ggsave(
+    filename = here("figs", filename),
+    width = width, height = height, dpi = 200, bg = "white"
+  )
+}
+```
+
+
+# The Study
+
+The study investigates the effect of three treatments (A, B, C) on AF and PR. Potential covariates include participant 
+age, sex, smoking status, and individual SNP genotypes encoded under an additive genetic model.
+
+# Read in Data
+
+The dataset (`FITFR-final-data-v3.xlsx`) contains 100 participants and 58 variables, organised into three broad categories: demographics (`age`, `sex`, `treatment`, `smoker`), genetics (51 SNP variables with the prefix `rs`), and 
+outcome measures (`AF` and `PR`). 
+
+## 1. Load raw data
+
+The raw file has a two-row header: the first row contains broad category labels ("demographics", "genetics", "measures") and the second row contains the actual column names. We skip the first row on read and drop the resulting category-label row and the empty leading column manually.
+
+```{r load}
+df_raw <- read_excel(here("raw-data", "FITFR-final-data-v3.xlsx"), sheet = 1, skip = 1)
+
+cat("Raw dimensions:", nrow(df_raw), "x", ncol(df_raw))
+```
+
+# Cleaning / Pre-processing
+
+## · Remove junk rows
+
+The last four rows of the file are artefacts: three fully-empty rows and one garbled header fragment. Every genuine participant has a non-missing ID, so filtering on `ID` removes them cleanly.
+
+```{r remove-junk}
+df <- df_raw |>
+  filter(!is.na(ID))
+
+cat("Dimensions after removing junk rows:", nrow(df), "x", ncol(df))
+```
+
+## · Check column types
+
+Before proceeding with cleaning, we inspect the column types to verify that variables have been read in correctly and identify any that require conversion.
+
+```{r inspectdf_before}
+# Variable Types Overview
+inspect_types(df) |> show_plot()
+
+# Frequency distributions of the categorical variables
+inspect_cat(df)
+
+# Distributions of the continuous variables
+df |> select(-ID) |> inspect_num() |> show_plot()
+```
+
+The majority of columns (56) are read in as character, with only 2 numeric columns (`ID` and `AF`). This confirms that type conversion is required: `age` must be coerced to numeric, and categorical variables such as `sex`, `treatment`, 
+`smoker`, and `PR` must be converted to factors. The SNP columns will also require some encoding under an additive genetic model.
+
+## · Fix column types
+
+Based on the type inspection above, `ID`, `age`, and `AF` are converted to their correct numeric types. Categorical variables are addressed in the following step.
+
+```{r col-types}
+df <- df |>
+  mutate(
+    ID  = as.integer(ID),
+    age = as.numeric(age),
+    AF  = as.numeric(AF)
+  )
+df
+```
+
+## · Standardise categorical variables
+
+Several variables have inconsistent capitalisation or coding. We standardise them here and convert each to a factor.
+
+```{r standardise-cats}
+df <- df |>
+  mutate(
+    # sex: Female/female/Male/male/M → Female / Male
+    sex = case_when(
+      str_to_lower(sex) == "female"         ~ "Female",
+      str_to_lower(sex) %in% c("male", "m") ~ "Male",
+      TRUE                                  ~ NA_character_
+    ),
+    sex = factor(sex, levels = c("Female", "Male")),
+
+    # treatment: a/b/c → A/B/C
+    treatment = factor(str_to_upper(treatment), levels = c("A", "B", "C")),
+
+    # smoker: only 'N' is present in this dataset
+    smoker = factor(smoker, levels = "N"),
+
+    # PR: yes/no → ordered factor
+    PR = case_when(
+      str_to_lower(PR) == "yes" ~ 1L,
+      str_to_lower(PR) == "no"  ~ 0L,
+      TRUE                      ~ NA_integer_
+    ),
+    PR = factor(PR, levels = c(0, 1), labels = c("no", "yes"))
+  )
+df
+```
+
+## · Sentinel value −99 in age
+
+Two participants have `age = -99`, which is a sentinel for missing data. These are recoded to `NA`.
+
+```{r age-sentinel}
+
+df$age == -99
+
+n_sentinel <- sum(df$age < 0, na.rm = TRUE)
+cat(n_sentinel, "rows with age = -99 recoded to NA")
+
+df <- df |>
+  mutate(age = if_else(age == -99, NA_real_, age))
+df
+```
+
+## · Zero-variance columns
+
+Two columns carry no information for modelling:
+
+-   `smoker`: all participants are non-smokers (`N`); no variation to estimate an effect from.
+-   `rs123456`: all participants are `CC`; the SNP is monomorphic in this sample.
+
+Both are retained in the cleaned dataset for transparency but should be excluded from any model.
+
+```{r zero-var}
+zero_var_cols <- c("smoker", "rs123456")
+cat("Zero-variance columns (retain but exclude from models):",
+    paste(zero_var_cols, collapse = ", "))
+```
+
+## · SNP additive encoding
+
+SNP variables are encoded using a standard additive genetic model. Each genotype is converted into a numeric value representing the number of alternate alleles present.
+
+The encoding follows these rules:
+
+-   **0**: homozygous reference genotype (no alternate alleles)
+-   **1**: heterozygous genotype (one alternate allele)
+-   **2**: homozygous alternate genotype (two alternate alleles)
+
+Because the raw data store genotypes as character pairs (e.g. `AA`, `AC`, `CC`), the encoding is performed separately for each SNP column. The procedure is:
+
+-   Identify all **unique genotypes** observed for the SNP.
+-   Extract **homozygous genotypes** (e.g. `AA`, `CC`, `GG`, `TT`).
+-   Determine the **reference allele** as the allele appearing in the **most frequent homozygous genotype**.
+-   Treat all other observed alleles at that SNP as **alternate alleles**.
+-   For each genotype, **count the number of alternate alleles** it contains:
+    -   e.g. if `A` is the reference allele
+        -   `AA → 0`
+        -   `AC → 1`
+        -   `CC → 2`
+-   Missing values remain as `NA`.
+
+Finally, the encoded SNP values are stored as **ordered factors with levels `0 < 1 < 2`**, preserving the ordering of increasing alternate-allele dosage.
+
+```{r snp-encode}
+snp_cols <- names(df)[str_detect(names(df), "^rs")]
+
+encode_snp <- function(x) {
+  x       <- as.character(x)
+  genos   <- na.omit(unique(x))
+  homozyg <- genos[substr(genos, 1, 1) == substr(genos, 2, 2)]
+  if (length(homozyg) < 1) return(factor(x))
+  counts      <- table(x[x %in% homozyg])
+  ref_allele  <- substr(names(which.max(counts)), 1, 1)
+  alt_alleles <- setdiff(unique(unlist(strsplit(genos, ""))), ref_allele)
+  count_alt   <- function(g) sum(strsplit(g, "")[[1]] %in% alt_alleles)
+  coded       <- sapply(x, function(g) if (is.na(g)) NA_integer_ else count_alt(g))
+  factor(coded, levels = c(0, 1, 2), ordered = TRUE)
+}
+
+df[snp_cols] <- lapply(df[snp_cols], encode_snp)
+```
+
+## · Cleaned dataset summary
+
+Following all cleaning and encoding steps, we re-inspect the dataset to verify that all column types are now correct and that the cleaning steps have been applied as expected.
+
+```{r inspectdf_after}
+# Variable Types Overview
+inspect_types(df) |> show_plot()
+
+# Frequency distributions of the categorical variables
+inspect_cat(df)
+
+# Distributions of the continuous variables
+df |> select(-ID) |> inspect_num() |> show_plot()
+```
+The types plot now shows the expected structure: 55 factor variables (including the SNP columns as ordered factors) and 3 numeric variables (`ID`, `age`, `AF`), confirming that all conversions were applied correctly.
+
+Basic Statistical Summary:
+
+```{r summary}
+key_vars <- c("ID", "age", "sex", "treatment", "AF", "PR")
+
+cat("Dimensions:", nrow(df), "x", ncol(df), "\n\n")
+
+cat("Missing values per key variable:\n")
+print(colSums(is.na(df[key_vars])))
+
+cat("\nTreatment distribution:\n")
+print(table(df$treatment, useNA = "ifany"))
+
+cat("\nSex distribution:\n")
+print(table(df$sex, useNA = "ifany"))
+
+cat("\nPR distribution:\n")
+print(table(df$PR, useNA = "ifany"))
+
+cat("\nAF summary:\n")
+print(summary(df$AF))
+
+cat("\nAge summary:\n")
+print(summary(df$age))
+```
+
+The cleaned dataset contains 100 participants across 58 variables. Only `age` has missing values (n = 2). Treatment groups are reasonably balanced (A: 32, B: 29, C: 39), as is sex (Female: 51, Male: 49) and PR outcome (no: 49, yes: 51). AF ranges from 26.02 to 95.99 with a mean of 61.32 (median: 61.06), age ranges from 25 to 45 with a mean of 34.16.
+
+## · Save cleaned data
+
+```{r save}
+write.csv(df, here("data", "FITFR_clean.csv"), row.names = FALSE, na = "")
+cat("Saved to", here("data", "FITFR_clean.csv"))
+```
+
+# EDA
+
+[EDA]{.underline} = **Exploratory Data Analysis**
+
+This involves ‘getting to know’ the data before formal modelling begins—examining **what the data looks like**, **whether there are any missing values**, and **what relationships exist between variables**.
+
+## · Missing Values
+
+Missing data were assessed across all variables to determine whether any imputation or case exclusion would be required prior to modelling.
+
+```{r missing, fig.height=8}
+gg_miss_var(df) +
+  labs(title = "Missing values per variable") +
+  theme_bw()
+```
+
+Only `age` contains missing values, with 2 observations recorded as sentinel value −99 and subsequently recoded to `NA` during cleaning. All other variables are complete, so no imputation is necessary.
+
+## · Overview Summary
+
+To obtain an overview of the dataset's structure and the distribution of key variables, we apply `skim()` across the cleaned data frame.
+
+```{r skimr}
+skim(df)
+```
+
+```{r descriptive-stats}
+key_vars <- c("age", "sex", "treatment", "AF", "PR")
+
+df |>
+  select(all_of(key_vars)) |>
+  summarise(across(
+    where(is.numeric),
+    list(
+      mean = ~ round(mean(.x, na.rm = TRUE), 2),
+      sd   = ~ round(sd(.x, na.rm = TRUE), 2),
+      min  = ~ round(min(.x, na.rm = TRUE), 2),
+      max  = ~ round(max(.x, na.rm = TRUE), 2),
+      missing = ~ sum(is.na(.x))
+    )
+  ))
+
+# Categorical variables
+df |>
+  select(all_of(key_vars)) |>
+  select(where(is.factor)) |>
+  pivot_longer(everything(), names_to = "variable", values_to = "value") |>
+  group_by(variable, value) |>
+  summarise(n = n(), .groups = "drop") |>
+  mutate(percent = round(n / sum(n) * 100, 1), .by = variable)
+```
+
+The dataset contains 100 participants and 58 columns, comprising 55 factor variables and 3 numeric variables. Age is the only variable with missing values (n = 2, complete rate = 0.98), with a mean of 34.2 years (SD = 6.2). AF has no 
+missing values, with a mean of 61.3 (SD = 19.8). Among the categorical variables, sex is approximately balanced (Female: 51, Male: 49), and treatment groups are reasonably well-distributed (C: 39, A: 32, B: 29). All participants are 
+non-smokers, confirming that smoking status carries no variation and will be excluded from modelling. The SNP variables are fully observed and encoded as ordered factors with three levels (0, 1, 2), with heterozygous genotypes (dosage 
+= 1) being the most common across most loci.
+
+## · Distribution of variables
+
+To understand the structure of the data, we examine the distribution of all variables, separating continuous variables from categorical ones.
+
+### - Continuous Variables
+
+The dataset contains two continuous variables of interest: `AF` (the primary outcome) and `age` (a potential covariate).
+
+```{r continuous-dist}
+# AF Distribution
+p1 <- ggplot(df, aes(x = AF)) +
+  geom_histogram(bins = 30, fill = "steelblue", alpha = 0.7) +
+  geom_density(aes(y = after_stat(count)), colour = "red") +
+  labs(title = "Distribution of AF") +
+  theme_bw()
+
+# Age Distribution
+p2 <- ggplot(df, aes(x = age)) +
+  geom_histogram(bins = 20, fill = "darkorange", alpha = 0.7) +
+  labs(title = "Distribution of Age") +
+  theme_bw()
+
+p1 + p2
+```
+
+According to the distribution plots above, AF is roughly uniformly distributed across its range of approximately 26 to 96, with no strong skew or obvious outliers. Age is similarly spread between 25 and 45, with a slight concentration of participants in the late 20s, consistent with 
+the mean of 34.2 years reported in the summary above.
+
+### - Categorical Variables
+
+The categorical variables include `treatment` (the primary predictor, with three
+levels: A, B, C, `sex`, and `PR` (the binary outcome).
+
+```{r cat-dist}
+p3 <- ggplot(df, aes(x = treatment, fill = treatment)) +
+  geom_bar() +
+  geom_text(stat = "count", aes(label = after_stat(count)), vjust = -0.5) +
+  theme_bw() + theme(legend.position = "none") +
+  labs(title = "Treatment group counts")
+
+p4 <- ggplot(df, aes(x = sex, fill = sex)) +
+  geom_bar() +
+  geom_text(stat = "count", aes(label = after_stat(count)), vjust = -0.5) +
+  theme_bw() + theme(legend.position = "none") +
+  labs(title = "Sex distribution")
+
+p5 <- ggplot(df, aes(x = PR, fill = PR)) +
+  geom_bar() +
+  geom_text(stat = "count", aes(label = after_stat(count)), vjust = -0.5) +
+  theme_bw() + theme(legend.position = "none") +
+  labs(title = "PR distribution")
+
+p3 + p4 + p5
+```
+
+According to the distribution plots above, treatment group C has slightly more participants (n = 39) compared to A (n = 32) and B (n = 29). Sex is nearly equal between Female (n = 51) and Male (n = 49). The PR outcome is also evenly split (no: 49, yes: 51), indicating no class imbalance issue for binary modelling.
+
+## · Descriptive statistics by treatment group
+
+To compare the distribution of key variables across treatment groups, we generate a Table 1 stratified by treatment.
+
+```{r table-one}
+vars     <- c("age", "sex", "AF", "PR")
+cat_vars <- c("sex", "PR")
+
+tbl <- CreateTableOne(
+  vars       = vars,
+  strata     = "treatment",
+  data       = df,
+  factorVars = cat_vars
+)
+
+print(tbl, showAllLevels = TRUE, quote = FALSE, noSpaces = TRUE)
+```
+
+Treatment groups differ significantly in AF (p < 0.001), with group B having the highest mean AF (76.93, SD = 11.22), followed by group C (69.24, SD = 13.00) and group A (37.53, SD = 6.37), suggesting a strong treatment effect. Age also differs marginally across groups (p = 0.040), with group B being slightly older on average (36.32 years). Sex distribution (p = 0.615) and PR rate (p = 0.084) do not differ significantly across treatment groups.
+
+```{r}
+kruskal.test(AF ~ treatment, data = df)
+```
+
+
+## · Correlation Matrix
+
+To assess potential multicollinearity among continuous and genetic variables, we examine pairwise correlations between age, AF, and all SNP variables first using `corrplot`.
+
+```{r corrplot, fig.height=15}
+snp_cols <- names(df)[str_detect(names(df), "^rs")]
+
+cor_data <- df |>
+  select(age, AF, all_of(snp_cols)) |>
+  mutate(across(everything(), as.numeric)) |>
+  na.omit()
+
+corrplot(cor(cor_data),
+         method = "color",
+         type   = "upper",
+         addCoef.col = "black",
+         tl.cex = 0.7,
+         number.cex = 0.6,
+         title  = "Correlation Matrix: Continuous & SNP Variables",
+         mar    = c(0,0,1,0))
+```
+
+The correlation matrix reveals that most SNP variables show weak pairwise correlations with each other and with age and AF, suggesting limited multicollinearity among the genetic predictors. A small number of SNP pairs show moderate correlations (|r| > 0.3), which may warrant attention during modelling. 
+
+# Primary Relationships / Plots
+
+Having explored the structure and distribution of the data, we now examine the key relationships relevant to the research question: the effect of treatment on AF and PR, and the potential influence of covariates including age, sex, and genetic variables.
+
+Smoking status and rs123456 are excluded from further analysis as both are zero-variance variables — all participants are non-smokers and all carry the CC genotype at rs123456, meaning neither variable can contribute any information to the model.
+
+## Main topic: The impact of treatment on AF and PR
+
+We first examine the primary relationship of interest — how treatment group relates to both the continuous outcome AF and the binary outcome PR.
+
+```{r af-treatment, fig.cap="Distribution of AF by treatment group."}
+ggplot(df, aes(x = treatment, y = AF, fill = treatment)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = 21) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(title = "AF by Treatment Group", x = "Treatment", y = "AF") +
+  theme_bw() +
+  theme(legend.position = "none")
+```
+
+```{r af-treatment-ppt}
+ggplot(df, aes(x = treatment, y = AF, fill = treatment)) +
+  geom_boxplot(alpha = 0.8, outlier.shape = 21, width = 0.5) +
+  stat_summary(fun = mean, geom = "point", shape = 23,
+               size = 4, fill = "white", colour = "black") +
+  scale_fill_manual(values = trt_colours) +
+  labs(title = "AF by Treatment Group",
+       subtitle = "Diamond = group mean  ·  Kruskal–Wallis p < 0.001",
+       x = "Treatment", y = "AF") +
+  theme_ppt +
+  theme(legend.position = "none")
+
+save_ppt_fig("ppt_af_by_treatment.png")
+```
+
+AF values differ substantially across treatment groups. Group B shows the highest median AF (approximately 78), followed by group C (approximately 64), while group A has considerably lower values (median approximately 37) with a much tighter
+distribution. The non-overlapping interquartile ranges between group A and the other two groups strongly suggest a clinically meaningful treatment effect on AF.
+
+```{r pr-treatment, fig.cap="Proportion of PR by treatment group."}
+df |>
+  filter(!is.na(PR)) |>
+  group_by(treatment, PR) |>
+  summarise(n = n(), .groups = "drop") |>
+  mutate(prop = n / sum(n), .by = treatment) |>
+  ggplot(aes(x = treatment, y = prop, fill = PR)) +
+  geom_col(position = "dodge", alpha = 0.85) +
+  scale_fill_brewer(palette = "Set1") +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "PR Rate by Treatment Group", x = "Treatment",
+       y = "Proportion", fill = "PR") +
+  theme_bw()
+```
+
+```{r pr-treatment-ppt}
+df |>
+  filter(!is.na(PR)) |>
+  group_by(treatment, PR) |>
+  summarise(n = n(), .groups = "drop") |>
+  mutate(prop = n / sum(n), .by = treatment) |>
+  ggplot(aes(x = treatment, y = prop, fill = PR)) +
+  geom_col(position = "dodge", alpha = 0.85, width = 0.6) +
+  geom_text(aes(label = percent(prop, accuracy = 1)),
+            position = position_dodge(0.6), vjust = -0.4, size = 5) +
+  scale_fill_manual(values = c(no = "#B0C4CC", yes = "#0D7680"),
+                    labels = c("PR: No", "PR: Yes")) +
+  scale_y_continuous(labels = percent, limits = c(0, 0.85)) +
+  labs(title = "PR Rate by Treatment Group",
+       subtitle = "B: 65.5%  ·  A: 53.1%  ·  C: 38.5%  ·  χ² p = 0.084",
+       x = "Treatment", y = "Proportion", fill = NULL) +
+  theme_ppt
+
+save_ppt_fig("ppt_pr_by_treatment.png")
+```
+
+Treatment group B has the highest PR rate (approximately 66%), followed by group A (approximately 53%), while group C has the lowest PR rate (approximately 38%) despite having the second highest AF values. This suggests 
+that the relationship between treatment, AF, and PR is not straightforward, and that treatment C may produce higher AF values without necessarily translating to a PR.
+
+## Sub-topic: The impact of Age on AF and PR
+
+Age is a potential covariate that may confound the relationship between treatment and the outcomes. We examine whether age is associated with either AF or PR before formal modelling.
+
+```{r af-age-marginal, fig.cap="Relationship between age and AF."}
+ggplot(df, aes(x = age, y = AF)) +
+  geom_point(alpha = 0.4, colour = "steelblue") +
+  geom_smooth(method = "lm", se = TRUE, colour = "red") +
+  labs(title = "AF vs Age", x = "Age", y = "AF") +
+  theme_bw()
+```
+
+```{r af-age-marginal-ppt}
+ggplot(df, aes(x = age, y = AF)) +
+  geom_point(alpha = 0.45, colour = "#0D7680", size = 2.5) +
+  geom_smooth(method = "lm", se = TRUE, colour = "#E8A838", fill = "#E8A838", alpha = 0.15) +
+  labs(title = "AF vs Age",
+       subtitle = "Positive trend; considerable scatter driven by treatment differences",
+       x = "Age (years)", y = "AF") +
+  theme_ppt
+
+save_ppt_fig("ppt_af_vs_age.png", width = 8, height = 6)
+```
+
+There is a positive linear relationship between age and AF, with older participants tending to have higher AF values. However, there is considerable scatter around the regression line, suggesting that age alone does not fully explain the variation in AF. This indicates that age may act as a covariate worth adjusting for in formal modelling, but treatment group is likely the dominant predictor.
+
+```{r pr-age, fig.cap="Age distribution by PR outcome."}
+ggplot(df |> filter(!is.na(PR)), aes(x = PR, y = age, fill = PR)) +
+  geom_boxplot(alpha = 0.7) +
+  scale_fill_brewer(palette = "Set1") +
+  labs(title = "Age by PR Outcome", x = "PR", y = "Age") +
+  theme_bw() +
+  theme(legend.position = "none")
+```
+
+```{r pr-age-ppt}
+ggplot(df |> filter(!is.na(PR)), aes(x = PR, y = age, fill = PR)) +
+  geom_boxplot(alpha = 0.8, width = 0.45) +
+  scale_fill_manual(values = c(no = "#B0C4CC", yes = "#0D7680")) +
+  labs(title = "Age by PR Outcome",
+       subtitle = "Median: 29 yrs (PR = no)  vs  40 yrs (PR = yes)",
+       x = "PR", y = "Age (years)") +
+  theme_ppt +
+  theme(legend.position = "none")
+
+save_ppt_fig("ppt_age_by_pr.png", width = 8, height = 6)
+```
+
+Participants with a PR (PR = yes) tend to be considerably older (median approximately 40 years) compared to those without (median approximately 29 years), with minimal overlap between the interquartile ranges of the two 
+groups. This suggests that age is strongly associated with PR outcome and should be included as a covariate in any model predicting PR.
+
+## Sub-topic: The impact of sex on AF and PR
+
+We next examine whether sex is associated with AF or PR, as it may act as a confounding variable in the relationship between treatment and the outcomes.
+
+```{r af-sex, fig.cap="AF by sex."}
+ggplot(df, aes(x = sex, y = AF, fill = sex)) +
+  geom_boxplot(alpha = 0.7) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(title = "AF by Sex", x = "Sex", y = "AF") +
+  theme_bw() +
+  theme(legend.position = "none")
+```
+
+```{r af-sex-ppt}
+ggplot(df, aes(x = sex, y = AF, fill = sex)) +
+  geom_boxplot(alpha = 0.8, width = 0.45) +
+  stat_summary(
+    fun = median,
+    geom = "text",
+    aes(label = round(after_stat(y), 1)),
+    vjust = -0.5,
+    size = 5,
+    fontface = "bold"
+  ) +
+  scale_fill_manual(values = c(Female = "#7FB3C8", Male = "#4A7FA5")) +
+  labs(title = "AF by Sex",
+       subtitle = "Distributions are similar — sex unlikely to confound AF",
+       x = "Sex", y = "AF") +
+  theme_ppt +
+  theme(legend.position = "none")
+save_ppt_fig("ppt_af_by_sex.png", width = 8, height = 6)
+```
+
+AF distributions are similar between females and males, with both groups having comparable medians (approximately 60 and 63 respectively) and largely overlapping interquartile ranges. This suggests that sex has little marginal association with AF, though it may still be worth adjusting for in formal modelling.
+
+```{r pr-sex, fig.cap="PR rate by sex."}
+df |>
+  filter(!is.na(PR), !is.na(sex)) |>
+  group_by(sex, PR) |>
+  summarise(n = n(), .groups = "drop") |>
+  mutate(prop = n / sum(n), .by = sex) |>
+  ggplot(aes(x = sex, y = prop, fill = PR)) +
+  geom_col(position = "dodge", alpha = 0.85) +
+  scale_fill_brewer(palette = "Set1") +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "PR Rate by Sex", x = "Sex", y = "Proportion", fill = "PR") +
+  theme_bw()
+```
+
+```{r pr-sex-ppt}
+df |>
+  filter(!is.na(PR), !is.na(sex)) |>
+  group_by(sex, PR) |>
+  summarise(n = n(), .groups = "drop") |>
+  mutate(prop = n / sum(n), .by = sex) |>
+  ggplot(aes(x = sex, y = prop, fill = PR)) +
+  geom_col(position = "dodge", alpha = 0.85, width = 0.6) +
+  geom_text(aes(label = percent(prop, accuracy = 1)),
+            position = position_dodge(0.6), vjust = -0.4, size = 5) +
+  scale_fill_manual(values = c(no = "#B0C4CC", yes = "#0D7680"),
+                    labels = c("PR: No", "PR: Yes")) +
+  scale_y_continuous(labels = percent, limits = c(0, 0.75)) +
+  labs(title = "PR Rate by Sex",
+       subtitle = "~51% in both sexes — no meaningful association with PR",
+       x = "Sex", y = "Proportion", fill = NULL) +
+  theme_ppt
+
+save_ppt_fig("ppt_pr_by_sex.png", width = 8, height = 6)
+```
+
+The PR rate is virtually identical between females and males (both approximately 51% positive), indicating that sex has no meaningful association with PR in this dataset. Sex is therefore unlikely to be an important covariate for the PR outcome in formal modelling.
+
+## Sub-topic: The effect of SNP on AF and PR
+
+Before examining SNP–outcome associations, we first look at how genotypes are distributed across dosage groups. Most SNPs in this sample are dominated by heterozygous carriers (dosage = 1), with relatively few participants in the homozygous alternate group (dosage = 2) — meaning effect estimates at dosage 2 should be interpreted with caution due to small cell sizes.
+
+```{r snp-dosage-example}
+# Select two representative SNPs to illustrate the dosage distribution
+example_snps <- c("rs19486", "rs91154")
+
+df |>
+  select(all_of(example_snps)) |>
+  pivot_longer(everything(), names_to = "SNP", values_to = "dosage") |>
+  filter(!is.na(dosage)) |>
+  group_by(SNP, dosage) |>
+  summarise(n = n(), .groups = "drop") |>
+  mutate(pct = n / sum(n), .by = SNP) |>
+  ggplot(aes(x = dosage, y = n, fill = dosage)) +
+  geom_col(width = 0.55, alpha = 0.85) +
+  geom_text(aes(label = paste0("n=", n, "\n(", round(pct*100), "%)")),
+            vjust = -0.3, size = 4.5, fontface = "bold", lineheight = 0.9) +
+  scale_fill_manual(values = c("0" = "#A8D5D9", "1" = "#0D7680", "2" = "#1B2B4B")) +
+  scale_y_continuous(limits = c(0, 70), expand = c(0, 0)) +
+  facet_wrap(~ SNP) +
+  labs(
+    title    = "Dosage Distribution — Example SNPs",
+    subtitle = "Number of participants per alternate allele dosage group",
+    x        = "Alternate Allele Dosage (0 / 1 / 2)",
+    y        = "Count"
+  ) +
+  theme_ppt +
+  theme(legend.position = "none")
+
+save_ppt_fig("ppt_snp_dosage_example.png", width = 8, height = 7)
+```
+
+Finally, we examine whether genetic variation, as captured by the SNP variables, is associated with AF or PR. Each SNP is encoded under an additive model with dosage values of 0, 1, or 2 representing the number of alternate alleles carried by each participant.
+
+```{r snp-af, fig.cap="AF distribution by SNP dosage for each SNP.", fig.height=10}
+snp_cols <- names(df)[str_detect(names(df), "^rs") & 
+                        names(df) != "rs123456"]  # 排除零方差列
+
+df |>
+  select(AF, all_of(snp_cols)) |>
+  pivot_longer(-AF, names_to = "SNP", values_to = "dosage") |>
+  filter(!is.na(dosage)) |>
+  ggplot(aes(x = dosage, y = AF, fill = dosage)) +
+  geom_boxplot(alpha = 0.7) +
+  facet_wrap(~ SNP, scales = "free_x") +
+  scale_fill_brewer(palette = "Blues") +
+  labs(title = "AF by SNP Dosage", x = "Alternate Allele Dosage",
+       y = "AF") +
+  theme_bw() +
+  theme(legend.position = "none")
+```
+
+Across most SNPs, the distribution of AF appears similar across dosage groups (0, 1, 2), with largely overlapping interquartile ranges, suggesting that the majority of SNPs have little marginal association with AF. However, a small number of SNPs show modest differences across dosage groups — for example, rs88128 appear to show a trend of increasing and rs19486 showing a trend of decreasing AF with higher alternate allele dosage. These SNPs may be worth investigating further in formal modelling, though the small sample sizes within each dosage group warrant caution in interpretation.
+
+To identify which SNPs show the strongest marginal association with AF, we computed the Spearman correlation between each SNP's alternate allele dosage and AF across all 50 SNPs. The top 10 SNPs ranked by |r| are shown below, with the direction of association indicated by colour.
+
+```{r snp-top10-af}
+snp_cols_clean <- names(df)[str_detect(names(df), "^rs") & names(df) != "rs123456"]
+
+# Calculate the Spearman’s correlation coefficient between each SNP and AF
+snp_cor_af <- tibble(
+  SNP = snp_cols_clean,
+  r   = sapply(snp_cols_clean, function(s) {
+    cor(as.numeric(df[[s]]), df$AF, use = "complete.obs", method = "spearman")
+  })
+) |>
+  arrange(desc(abs(r))) |>
+  slice_head(n = 10) |>
+  mutate(
+    SNP       = fct_reorder(SNP, abs(r)),
+    direction = if_else(r > 0, "Positive", "Negative")
+  )
+
+ggplot(snp_cor_af, aes(x = abs(r), y = SNP, fill = direction)) +
+  geom_col(width = 0.65, alpha = 0.85) +
+  geom_text(aes(label = sprintf("r = %.3f", r)),
+            hjust = -0.1, size = 4.5, fontface = "bold") +
+  scale_fill_manual(values = c(Positive = "#0D7680", Negative = "#E8A838")) +
+  scale_x_continuous(limits = c(0, 0.55), expand = c(0, 0)) +
+  labs(
+    title    = "Top 10 SNPs Associated with AF",
+    subtitle = "Spearman correlation  ·  sorted by |r|  ·  exploratory only",
+    x        = "|r|  (Spearman)",
+    y        = NULL,
+    fill     = "Direction"
+  ) +
+  theme_ppt +
+  theme(legend.position = "right")
+
+save_ppt_fig("ppt_snp_top10_af.png", width = 8, height = 6)
+```
+
+All top 10 correlations are weak (|r| ≤ 0.23), consistent with the expectation that individual SNPs rarely explain large proportions of variance in complex traits. rs19486 and rs26922 show the strongest negative associations with AF, while rs88128 shows the strongest positive association. These effect sizes are modest and should be interpreted cautiously — formal testing with appropriate multiple testing correction (e.g. Bonferroni or FDR) will be required before drawing any conclusions about individual SNP effects.
+
+To complement the AF analysis, we examine whether SNP dosage is associated with PR outcome. For each SNP, the proportion of participants with PR = yes and PR = no is plotted separately for each dosage group (0, 1, 2).
+
+```{r snp-pr, fig.cap="PR rate by SNP dosage for each SNP.", fig.height=10}
+df |>
+  select(PR, all_of(snp_cols)) |>
+  pivot_longer(-PR, names_to = "SNP", values_to = "dosage") |>
+  filter(!is.na(dosage), !is.na(PR)) |>
+  group_by(SNP, dosage, PR) |>
+  summarise(n = n(), .groups = "drop") |>
+  mutate(prop = n / sum(n), .by = c(SNP, dosage)) |>
+  ggplot(aes(x = dosage, y = prop, fill = PR)) +
+  geom_col(position = "dodge", alpha = 0.85) +
+  facet_wrap(~ SNP) +
+  scale_fill_brewer(palette = "Set1") +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "PR Rate by SNP Dosage", x = "Alternate Allele Dosage",
+       y = "Proportion", fill = "PR") +
+  theme_bw()
+```
+
+Similar to the AF results, most SNPs show little variation in PR rate across dosage groups, with the proportion of positive responses remaining roughly 50/50 regardless of alternate allele dosage. A few SNPs such as rs91154 and 
+rs58943 show more noticeable shifts in PR rate across dosage levels, which may warrant closer examination in formal modelling. Overall, the marginal effect of individual SNPs on PR appears modest at this exploratory stage.
+
+Similarly, to identify which SNPs show the strongest marginal association with PR, we computed the Spearman correlation between each SNP's alternate allele dosage and PR outcome (coded as 0 = no, 1 = yes) across all 50 SNPs. The top 10 SNPs ranked by |r| are shown below.
+
+```{r snp-top10-pr}
+# Converting PR to 0/1 values
+pr_numeric <- as.numeric(df$PR) - 1  # no=0, yes=1
+
+snp_cor_pr <- tibble(
+  SNP = snp_cols_clean,
+  r   = sapply(snp_cols_clean, function(s) {
+    cor(as.numeric(df[[s]]), pr_numeric, use = "complete.obs", method = "spearman")
+  })
+) |>
+  arrange(desc(abs(r))) |>
+  slice_head(n = 10) |>
+  mutate(
+    SNP       = fct_reorder(SNP, abs(r)),
+    direction = if_else(r > 0, "Positive", "Negative")
+  )
+
+ggplot(snp_cor_pr, aes(x = abs(r), y = SNP, fill = direction)) +
+  geom_col(width = 0.65, alpha = 0.85) +
+  geom_text(aes(label = sprintf("r = %.3f", r)),
+            hjust = -0.1, size = 4.5, fontface = "bold") +
+  scale_fill_manual(values = c(Positive = "#0D7680", Negative = "#E8A838")) +
+  scale_x_continuous(limits = c(0, 0.55), expand = c(0, 0)) +
+  labs(
+    title    = "Top 10 SNPs Associated with PR",
+    subtitle = "Spearman correlation (SNP dosage vs binary PR)  ·  exploratory only",
+    x        = "|r|  (Spearman)",
+    y        = NULL,
+    fill     = "Direction"
+  ) +
+  theme_ppt +
+  theme(legend.position = "right")
+
+#save_ppt_fig("ppt_snp_top10_pr.png", width = 8, height = 6)
+```
+
+rs91154 shows the strongest negative association with PR (r = −0.267), meaning higher alternate allele dosage is associated with a lower probability of PR. Nine of the top 10 SNPs show negative associations, with rs78356 being the only exception. As with AF, all correlations remain weak (|r| ≤ 0.27), and these findings are exploratory — formal testing with multiple testing correction is required before any SNP can be considered a candidate predictor of PR.
+
+To visualise the dosage-response relationship more directly, we plot the observed PR probability at each dosage level (0, 1, 2) for the top 10 SNPs identified above. A downward trend across dosage groups would be consistent with the negative correlations observed, suggesting that carrying more alternate alleles is associated with a lower probability of PR.
+
+```{r snp-dosage-pr-ppt}
+# Using the top 10 PR SNPs calculated earlier
+top_pr_snps <- snp_cor_pr |> pull(SNP) |> as.character()
+
+df |>
+  select(PR, all_of(top_pr_snps)) |>
+  pivot_longer(-PR, names_to = "SNP", values_to = "dosage") |>
+  filter(!is.na(dosage), !is.na(PR)) |>
+  group_by(SNP, dosage) |>
+  summarise(
+    prob = mean(PR == "yes"),
+    n    = n(),
+    .groups = "drop"
+  ) |>
+  mutate(dosage = as.numeric(as.character(dosage))) |>
+  ggplot(aes(x = dosage, y = prob, colour = SNP, group = SNP)) +
+  geom_line(linewidth = 0.9, alpha = 0.8) +
+  geom_point(aes(size = n), alpha = 0.85) +
+  scale_y_continuous(labels = percent, limits = c(0, 1)) +
+  scale_x_continuous(breaks = c(0, 1, 2),
+                     labels = c("0\n(hom ref)", "1\n(het)", "2\n(hom alt)")) +
+  scale_size_continuous(range = c(2, 6), guide = "none") +
+  labs(
+    title    = "PR Probability by SNP Dosage — Top 10 SNPs",
+    subtitle = "Point size proportional to n",
+    x        = "Alternate Allele Dosage",
+    y        = "PR Probability",
+    colour   = "SNP"
+  ) +
+  theme_ppt +
+  theme(legend.position = "right")
+
+#save_ppt_fig("ppt_snp_dosage_pr_prob.png", width = 9.3, height = 7)
+```
+
+The majority of SNPs show a consistent downward trend from dosage 0 to dosage 2, corroborating the negative correlations observed above. rs91154 shows the steepest decline, dropping from approximately 75% PR probability at dosage 0 to around 38% at dosage 2. rs78356 is the clear exception, showing an upward trend consistent with its positive correlation. Note that dosage 2 points are based on small cell sizes for most SNPs — the apparent trends at the homozygous alternate level should be interpreted with caution until confirmed in formal modelling.
+
+To provide a broader overview across all 50 SNPs, we plot PR probability by dosage for every SNP simultaneously, highlighting the 10 SNPs with the highest observed PR probability at any dosage level. Grey lines represent the remaining SNPs as background context.
+
+```{r snp-dosage-pr-prob-all-ppt}
+snp_probs <- df |>
+  select(PR, all_of(snp_cols_clean)) |>
+  pivot_longer(-PR, names_to = "SNP", values_to = "dosage") |>
+  filter(!is.na(dosage), !is.na(PR)) |>
+  group_by(SNP, dosage) |>
+  summarise(
+    prob = mean(PR == "yes"),
+    n    = n(),
+    .groups = "drop"
+  ) |>
+  mutate(dosage = as.numeric(as.character(dosage)))
+
+# 找出任意 dosage 下 PR 概率最高的前 10 个 SNP
+top10_snps <- snp_probs |>
+  group_by(SNP) |>
+  summarise(max_prob = max(prob)) |>
+  arrange(desc(max_prob)) |>
+  slice_head(n = 10) |>
+  pull(SNP)
+
+snp_probs |>
+  mutate(
+    highlight = if_else(SNP %in% top10_snps, SNP, "other"),
+    alpha_val = if_else(SNP %in% top10_snps, 1, 0.15),
+    lwd_val   = if_else(SNP %in% top10_snps, 1.1, 0.5)
+  ) |>
+  ggplot(aes(x = dosage, y = prob, group = SNP,
+             colour = highlight, alpha = alpha_val, linewidth = lwd_val)) +
+  geom_line() +
+  geom_point(data = ~ filter(., SNP %in% top10_snps),
+             aes(size = n), alpha = 1) +
+  scale_colour_manual(
+    values = c(setNames(scales::hue_pal()(10), top10_snps), other = "grey70"),
+    breaks = top10_snps   # legend 只显示 top 10
+  ) +
+  scale_alpha_identity() +
+  scale_linewidth_identity() +
+  scale_size_continuous(range = c(2, 5), guide = "none") +
+  scale_y_continuous(labels = percent, limits = c(0, 1)) +
+  scale_x_continuous(breaks = c(0, 1, 2),
+                     labels = c("0\n(hom ref)", "1\n(het)", "2\n(hom alt)")) +
+  labs(
+    title    = "PR Probability by SNP Dosage — All SNPs",
+    subtitle = "Top 10 by max PR probability highlighted",
+    x        = "Alternate Allele Dosage",
+    y        = "PR Probability",
+    colour   = "Top 10 SNPs"
+  ) +
+  theme_ppt +
+  theme(legend.position = "right")
+
+save_ppt_fig("ppt_snp_dosage_pr_prob_all.png", width = 9.3, height = 7)
+```
+
+Unlike the top 10 by correlation (which were predominantly negative), the top 10 by maximum PR probability show more heterogeneous patterns — some lines trend downward (e.g. rs91154), while others increase sharply at dosage 2 (e.g. rs56579, rs78356). This divergence highlights that high maximum probability does not necessarily imply a consistent dosage-response relationship. The crossing of lines at dosage 1 and the wide spread at dosage 2 again reflect the small sample sizes in the homozygous alternate group, which can produce unstable probability estimates. These SNPs warrant closer inspection in formal modelling, but no conclusions should be drawn from exploratory plots alone.
+
+## Interaction：Treatment × Age → AF
+
+Given that both treatment and age appear to be associated with AF, we examine whether the effect of age on AF differs across treatment groups, which would indicate a treatment-age interaction.
+
+```{r af-age-treatment, fig.cap="AF vs age stratified by treatment group."}
+ggplot(df, aes(x = age, y = AF, colour = treatment)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", se = TRUE) +
+  scale_colour_brewer(palette = "Set2") +
+  labs(title = "AF vs Age by Treatment Group", x = "Age", y = "AF",
+       colour = "Treatment") +
+  theme_bw()
+```
+
+```{r af-age-treatment-ppt}
+ggplot(df, aes(x = age, y = AF, colour = treatment)) +
+  geom_point(alpha = 0.5, size = 2.5) +
+  geom_smooth(method = "lm", se = TRUE, alpha = 0.12) +
+  scale_colour_manual(values = trt_colours) +
+  labs(title = "AF vs Age by Treatment Group",
+       subtitle = "Parallel slopes → no treatment × age interaction; treatment is the dominant predictor",
+       x = "Age (years)", y = "AF", colour = "Treatment") +
+  theme_ppt
+
+save_ppt_fig("ppt_af_age_by_treatment.png", width = 9, height = 6)
+```
+
+When stratified by treatment, the relationship between age and AF becomes remarkably strong within each group, with points clustering tightly around the regression lines. The three lines run parallel with similar slopes, confirming that the effect of age on AF is consistent across treatment groups with no evidence of a treatment-age interaction. The large vertical separation between group A and groups B and C confirms that the wide scatter seen in the unstratified plot was largely driven by treatment differences, reinforcing that treatment is a dominant predictor of AF that must be accounted for in any formal model.
+
+## Interaction：Treatment × Sex → AF
+
+We also examine whether the effect of treatment on AF differs by sex, which would indicate a treatment-sex interaction.
+
+```{r af-sex-treatment, fig.cap="AF by treatment group, stratified by sex."}
+ggplot(df, aes(x = treatment, y = AF, fill = sex)) +
+  geom_boxplot(alpha = 0.7, position = position_dodge(0.8)) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(title = "AF by Treatment and Sex", x = "Treatment", y = "AF",
+       fill = "Sex") +
+  theme_bw()
+```
+
+```{r af-sex-treatment}
+ggplot(df, aes(x = treatment, y = AF, fill = sex)) +
+  geom_boxplot(alpha = 0.8, position = position_dodge(0.8)) +
+  scale_fill_manual(values = c(Female = "#7FB3C8", Male = "#4A7FA5")) +
+  labs(title = "AF by Treatment and Sex",
+       subtitle = "Overlapping IQRs within each group — little evidence of treatment × sex interaction",
+       x = "Treatment", y = "AF", fill = "Sex") +
+  theme_ppt
+
+save_ppt_fig("ppt_af_treatment_by_sex.png", width = 9, height = 6)
+```
+
+Within each treatment group, AF distributions are largely similar between females and males, with overlapping interquartile ranges across all three groups. The dominant pattern remains the treatment effect — group A has substantially lower AF than groups B and C regardless of sex. There is a slight tendency for males to have marginally higher AF in groups A and C, but the overlap is considerable and this difference appears negligible. Overall, there is little evidence of a treatment-sex interaction, suggesting that the effect of treatment on AF does not differ meaningfully between females and males.
+
+
+# Models
+
+
+
+
+
+
+
+
+

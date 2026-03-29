@@ -1,0 +1,24 @@
+---
+title: README
+author: Kailin Xue
+date: today
+date-format: long
+format: 
+  pdf: default
+  html: 
+    self-contained: true
+    df-print: tibble
+editor_options: 
+  chunk_output_type: console
+execute: 
+  warning: false
+  message: false
+---
+
+```{r}
+#| label: setup
+pacman::p_load(tidyverse, targets, gt)
+here::here()
+```
+
+COMP 5070 statistical consulting project — analyses and reports prepared in response to requests from Karl Berator.
