@@ -20,7 +20,7 @@ The R packages listed each have their own specific functions:
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
-pacman::p_load(tidyverse, readxl, here, skimr, inspectdf, naniar, corrplot, tableone, patchwork, scales, broom, ResourceSelection)
+pacman::p_load(tidyverse, readxl, here, skimr, inspectdf, naniar, corrplot, tableone, patchwork, scales, broom, ResourceSelection, car)
 ```
 
 ```{r pptsetup, include=FALSE}

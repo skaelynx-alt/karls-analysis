@@ -21,7 +21,7 @@ pacman::p_load(tidyverse, targets, gt)
 here::here()
 ```
 
-STAT 4001 Statistical Consulting Project — analyses and reports prepared for client Karl Berator.
+STAT 4001 Statistical Consulting Project: Analyses and reports prepared for client Karl Berator.
 
 ## Project Overview
 
@@ -36,9 +36,9 @@ This project investigates the effect of three treatments (A, B, C) on two outcom
 | `figs/` | All figures exported for reporting; `ppt_` prefix = PowerPoint-optimised exports |
 | `R/` | Supporting R scripts |
 | `tabs/` | Exported tables |
-| `resources/` | Reference materials |
-| `tests/` | Sanity checks and unit tests |
-| `karl_data.Rmd` | Main analysis: cleaning, EDA, modelling, assumption checking |
+| `resources/` | Reference materials and other materials |
+| `tests/` | Sanity checks and tests |
+| `karl_data.Rmd` | Main analysis: cleaning, EDA, modelling, assumption checking; This is in folder `R` |
 | `readme.qmd` | This file |
 
 ## How to Reproduce
@@ -61,10 +61,14 @@ Cleaned data will be written to `data/FITFR_clean.csv`; figures will be saved to
 | `corrplot` | Correlation heatmaps |
 | `tableone` | Stratified descriptive statistics (Table 1) |
 | `patchwork` | Combining ggplot figures |
+| `broom` | Model tidying — `augment()` for residual diagnostics |
+| `car` | Variance Inflation Factors (`vif()`) |
+| `ResourceSelection` | Hosmer-Lemeshow goodness-of-fit test for logistic regression |
 
 ## Analysis Summary
 
 - **Data cleaning:** type coercion, sentinel value removal (`age = −99`), SNP additive encoding, zero-variance column flagging (`smoker`, `rs123456`)
 - **EDA:** distribution plots, Table 1 by treatment, correlation matrix, SNP–outcome associations
-- **Modelling:** linear regression for AF; logistic regression for PR; SNP candidates pre-screened via univariable regression (nominal p < 0.05)
-- **Key findings:** Treatment B produces the highest AF and PR rate; age is strongly associated with both outcomes; rs19486 and rs91154 are the top SNP candidates for AF and PR respectively (exploratory only)
+- **Modelling:** linear regression for AF; logistic regression for PR; SNP candidates pre-screened via univariable regression (nominal p < 0.05); main-effects model selected for both outcomes
+- **Assumption checking:** residual diagnostics and VIF for AF; Box-Tidwell, Hosmer-Lemeshow, VIF, and Cook's distance for PR
+- **Key findings:** Treatment B produces the highest AF; age is the dominant predictor of both outcomes; rs19486 and rs91154 are the top SNP candidates for AF and PR respectively (exploratory only)
