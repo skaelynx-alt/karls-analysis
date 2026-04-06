@@ -1,5 +1,5 @@
 ---
-title: "karls_data"
+title: "Karls_data"
 author: "Kailin"
 date: "2026-03-12"
 output: html_document
@@ -9,14 +9,6 @@ output: html_document
 rm(list = ls())
 gc()
 ```
-
-The R packages listed each have their own specific functions:
-
--   `skimr` — Generates a data summary (means, quantiles, missing rate, etc.) with a single command; much more visually appealing than `summary()`
--   `inspectdf` — examines data grouped by column type, making it ideal for quickly assessing the overall structure of a data frame
--   `naniar` — specialises in handling and visualising missing values (distribution and patterns of NAs)
--   `corrplot` — plots correlation matrix heatmaps to visualise correlations between continuous variables
--   `tableone` / `Table1` — generates the "Table 1" descriptive statistics table commonly found in academic papers, comparing the distribution of variables across groups
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
@@ -57,7 +49,7 @@ The study investigates the effect of three treatments (A, B, C) on AF and PR. Po
 
 The dataset (`FITFR-final-data-v3.xlsx`) contains 100 participants and 58 variables, organised into three broad categories: demographics (`age`, `sex`, `treatment`, `smoker`), genetics (51 SNP variables with the prefix `rs`), and outcome measures (`AF` and `PR`).
 
-## 1. Load raw data
+## Load raw data
 
 The raw file has a two-row header: the first row contains broad category labels ("demographics", "genetics", "measures") and the second row contains the actual column names. We skip the first row on read and drop the resulting category-label row and the empty leading column manually.
 
@@ -399,7 +391,7 @@ print(tbl, showAllLevels = TRUE, quote = FALSE, noSpaces = TRUE)
 
 Treatment groups differ significantly in AF (p \< 0.001), with group B having the highest mean AF (76.93, SD = 11.22), followed by group C (69.24, SD = 13.00) and group A (37.53, SD = 6.37), suggesting a strong treatment effect. Age also differs marginally across groups (p = 0.040), with group B being slightly older on average (36.32 years). Sex distribution (p = 0.615) and PR rate (p = 0.084) do not differ significantly across treatment groups.
 
-```{r}
+```{r kruskal-test}
 kruskal.test(AF ~ treatment, data = df)
 ```
 
@@ -835,7 +827,7 @@ snp_probs <- df |>
   ) |>
   mutate(dosage = as.numeric(as.character(dosage)))
 
-# 找出任意 dosage 下 PR 概率最高的前 10 个 SNP
+# Identify the top 10 SNPs with the highest probability of PR at any given dosage
 top10_snps <- snp_probs |>
   group_by(SNP) |>
   summarise(max_prob = max(prob)) |>
@@ -856,7 +848,7 @@ snp_probs |>
              aes(size = n), alpha = 1) +
   scale_colour_manual(
     values = c(setNames(scales::hue_pal()(10), top10_snps), other = "grey70"),
-    breaks = top10_snps   # legend 只显示 top 10
+    breaks = top10_snps   # legend: Show top 10 only
   ) +
   scale_alpha_identity() +
   scale_linewidth_identity() +
@@ -921,7 +913,7 @@ ggplot(df, aes(x = treatment, y = AF, fill = sex)) +
   theme_bw()
 ```
 
-```{r af-sex-treatment}
+```{r af-sex-treatment-ppt}
 ggplot(df, aes(x = treatment, y = AF, fill = sex)) +
   geom_boxplot(alpha = 0.8, position = position_dodge(0.8)) +
   scale_fill_manual(values = c(Female = "#7FB3C8", Male = "#4A7FA5")) +
