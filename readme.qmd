@@ -15,10 +15,56 @@ execute:
   message: false
 ---
 
-```{r}
+```{r include=FALSE}
 #| label: setup
 pacman::p_load(tidyverse, targets, gt)
 here::here()
 ```
 
-COMP 5070 statistical consulting project — analyses and reports prepared in response to requests from Karl Berator.
+STAT 4001 Statistical Consulting Project — analyses and reports prepared for client Karl Berator.
+
+## Project Overview
+
+This project investigates the effect of three treatments (A, B, C) on two outcomes: **AF** (continuous) and **PR** (binary). The dataset (`FITFRfinaldatav3.xlsx`) contains 100 participants across 58 variables, including demographics, 51 SNP genotypes encoded under an additive genetic model, and the two outcome measures.
+
+## Repository Structure
+
+| Folder / File | Contents |
+|---|---|
+| `raw-data/` | Original Excel data file (`FITFRfinaldatav3.xlsx`) |
+| `data/` | Cleaned dataset (`FITFR_clean.csv`) produced by the analysis script |
+| `figs/` | All figures exported for reporting; `ppt_` prefix = PowerPoint-optimised exports |
+| `R/` | Supporting R scripts |
+| `tabs/` | Exported tables |
+| `resources/` | Reference materials |
+| `tests/` | Sanity checks and unit tests |
+| `karl_data.Rmd` | Main analysis: cleaning, EDA, modelling, assumption checking |
+| `readme.qmd` | This file |
+
+## How to Reproduce
+
+1. Open `karls-analysis.Rproj` in RStudio.
+2. Ensure required packages are installed — the script uses `pacman::p_load()` to load them automatically.
+3. Knit `karl_data.Rmd` to reproduce the full analysis.
+
+Cleaned data will be written to `data/FITFR_clean.csv`; figures will be saved to `figs/`.
+
+## Key Packages
+
+| Package | Purpose |
+|---|---|
+| `tidyverse` | Data wrangling and visualisation |
+| `readxl` | Reading the raw Excel file |
+| `skimr` | Quick distributional summaries |
+| `inspectdf` | Column-type and frequency inspection |
+| `naniar` | Missing value visualisation |
+| `corrplot` | Correlation heatmaps |
+| `tableone` | Stratified descriptive statistics (Table 1) |
+| `patchwork` | Combining ggplot figures |
+
+## Analysis Summary
+
+- **Data cleaning:** type coercion, sentinel value removal (`age = −99`), SNP additive encoding, zero-variance column flagging (`smoker`, `rs123456`)
+- **EDA:** distribution plots, Table 1 by treatment, correlation matrix, SNP–outcome associations
+- **Modelling:** linear regression for AF; logistic regression for PR; SNP candidates pre-screened via univariable regression (nominal p < 0.05)
+- **Key findings:** Treatment B produces the highest AF and PR rate; age is strongly associated with both outcomes; rs19486 and rs91154 are the top SNP candidates for AF and PR respectively (exploratory only)

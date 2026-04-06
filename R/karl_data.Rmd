@@ -20,7 +20,7 @@ The R packages listed each have their own specific functions:
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
-pacman::p_load(tidyverse, readxl, here, skimr, inspectdf, naniar, corrplot, tableone, patchwork, scales)
+pacman::p_load(tidyverse, readxl, here, skimr, inspectdf, naniar, corrplot, tableone, patchwork, scales, broom, ResourceSelection)
 ```
 
 ```{r pptsetup, include=FALSE}
@@ -1043,19 +1043,22 @@ Three linear regression models are fitted for AF, each building on the previous 
 Comparing these three models allows us to see how much each additional set of variables improves the fit, and whether the treatment effect changes once other factors are accounted for.
 
 ```{r af-model-fit}
+
+df_model <- df |> drop_na(age)   # Remove NA rows in Age
+
 # Model 0: intercept only (for reference R²)
-lm_af_null <- lm(AF ~ 1, data = df)
+lm_af_null <- lm(AF ~ 1, data = df_model)
 cat("Model 0: Intercept only\n")
 print(lm_af_null)
 
 # Model 1: treatment only
-lm_af_base <- lm(AF ~ treatment, data = df)
+lm_af_base <- lm(AF ~ treatment, data = df_model)
 cat("-------\n")
 cat("Model 1: Treatment only\n")
 print(lm_af_base)
 
 # Model 2: treatment + age + sex
-lm_af_main <- lm(AF ~ treatment + age + sex, data = df)
+lm_af_main <- lm(AF ~ treatment + age + sex, data = df_model)
 cat("-------\n")
 cat("Model 2: Treatment + age + sex\n")
 print(lm_af_main)
@@ -1101,12 +1104,12 @@ Three logistic regression models are fitted for PR, following the same structure
 
 ```{r pr-model-fit}
 # Model 1: treatment only
-glm_pr_base <- glm(PR ~ treatment, data = df, family = binomial)
+glm_pr_base <- glm(PR ~ treatment, data = df_model, family = binomial)
 cat("Model 1: Treatment only\n")
 print(glm_pr_base)
 
 # Model 2: treatment + age + sex
-glm_pr_main <- glm(PR ~ treatment + age + sex, data = df, family = binomial)
+glm_pr_main <- glm(PR ~ treatment + age + sex, data = df_model, family = binomial)
 cat("-------\n")
 cat("Model 2: Treatment + age + sex\n")
 print(glm_pr_main)
@@ -1140,4 +1143,202 @@ print(glm_pr_snp)
 
 # Explore models / interpret models
 
-# Assumption checking
+## · AF Model
+
+```{r af-model-compare}
+# Compare models using AIC and adjusted R²
+model_compare_af <- tibble(
+  Model       = c("Null", "Treatment only", "Main effects", "Main + SNPs"),
+  AIC         = c(AIC(lm_af_null), AIC(lm_af_base),
+                  AIC(lm_af_main), AIC(lm_af_snp)),
+  Adj_R2      = c(
+    summary(lm_af_null)$adj.r.squared,
+    summary(lm_af_base)$adj.r.squared,
+    summary(lm_af_main)$adj.r.squared,
+    summary(lm_af_snp)$adj.r.squared
+  )
+) |>
+  mutate(across(where(is.numeric), ~ round(.x, 3)))
+
+print(model_compare_af)
+
+# ANOVA to formally test whether adding covariates improves fit
+anova(lm_af_base, lm_af_main, lm_af_snp)
+```
+
+Adding age and sex dramatically improves model fit (adjusted R² from 0.705 to 0.977, AIC drop of ~266 units; ANOVA p < 0.001). Adding rs19486 provides no further gain, so the main-effects model is preferred.
+
+```{r af-model-summary}
+# Full summary of the selected main-effects model
+summary(lm_af_main)
+
+# 95% confidence intervals for all coefficients
+confint(lm_af_main)
+```
+
+After adjusting for age and sex, treatment B and C are associated with AF values approximately 35.7 and 34.3 units higher than A respectively (both p < 0.001). Each additional year of age increases AF by ~1.65 units (p < 0.001). Sex has no meaningful effect as we expected. The model explains 97.7% of variance in AF.
+
+## · PR Model
+
+```{r pr-model-compare}
+# Compare models using AIC and McFadden's pseudo-R²
+mcfadden_r2 <- function(model) {
+  1 - (logLik(model) / logLik(update(model, . ~ 1)))
+}
+
+model_compare_pr <- tibble(
+  Model        = c("Treatment only", "Main effects", "Main + SNPs"),
+  AIC          = c(AIC(glm_pr_base), AIC(glm_pr_main), AIC(glm_pr_snp)),
+  McFadden_R2  = c(
+    as.numeric(mcfadden_r2(glm_pr_base)),
+    as.numeric(mcfadden_r2(glm_pr_main)),
+    as.numeric(mcfadden_r2(glm_pr_snp))
+  )
+) |>
+  mutate(across(where(is.numeric), ~ round(.x, 3)))
+
+print(model_compare_pr)
+
+# Likelihood ratio test
+anova(glm_pr_base, glm_pr_main, glm_pr_snp, test = "LRT")
+```
+
+The main-effects model substantially outperforms treatment alone (McFadden's R² from 0.036 to 0.322, AIC from 139.6 to 103.9; LRT p < 0.001). Adding rs91154 yields only a marginal further improvement (AIC: 102.6). The main-effects model (treatment + age + sex) is selected as the final PR model, as the addition of rs91154 yields only a marginal AIC improvement (103.9 → 102.6) and the SNP finding did not survive Bonferroni correction.
+
+```{r pr-model-summary}
+# Full summary of the selected main-effects model
+summary(glm_pr_main)
+
+# Odds ratios and 95% CIs (exponentiate log-odds coefficients)
+or_table <- tidy(glm_pr_main, conf.int = TRUE, exponentiate = TRUE) |>
+  filter(term != "(Intercept)") |>
+  mutate(across(c(estimate, conf.low, conf.high, p.value), ~ round(.x, 4)))
+
+print(or_table)
+```
+
+After adjusting for age and sex, neither treatment B nor C differs significantly from A in the odds of PR (both p > 0.05) — the raw treatment differences seen in the EDA were largely driven by age confounding. Age is the dominant predictor (OR ≈ 1.30 per year, p < 0.001). Sex shows no meaningful association as we expected.
+
+# Assumption Checking
+
+## · AF: Linear Regression Diagnostics
+
+Four standard diagnostic plots are examined to assess whether the linear regression assumptions are satisfied: linearity, homoscedasticity (constant variance), normality of residuals, and absence of highly influential observations.
+
+```{r af-diagnostics, fig.height=8, fig.width=10}
+# Base R diagnostic plots (Residuals vs Fitted, Q-Q, Scale-Location, Cook's D)
+par(mfrow = c(2, 2))
+plot(lm_af_main, which = 1:4)
+par(mfrow = c(1, 1))
+```
+
+The residuals vs fitted plot shows a U-shaped pattern, suggesting a violation of the linearity assumption. Variance also appears non-constant across the fitted range. Observations 53, 78, and 85 are flagged as potentially influential by Cook's distance. The Q-Q plot is broadly acceptable, with minor deviations at the tails.
+
+```{r af-multicollinearity}
+# Variance Inflation Factors — check for multicollinearity among predictors
+vif_af <- vif(lm_af_main)
+cat("VIF values (AF model):\n")
+print(round(vif_af, 3))
+# VIF > 10 (or conservatively > 5) indicates a problematic level of collinearity
+```
+
+All GVIF^(1/(2·Df)) values are close to 1 (treatment: 1.022, age: 1.058, sex: 1.027), indicating no meaningful multicollinearity among predictors.
+
+## · PR: Logistic Regression Diagnostics
+
+Logistic regression assumptions differ from linear regression. We check for linearity, multicollinearity, complete separation, overall goodness of fit, and influential observations.
+
+```{r pr-linearity}
+# Box-Tidwell test: checks whether continuous predictors have a linear relationship
+# with the log-odds of PR. Interaction term age:log(age) should be non-significant.
+df_bt <- df |>
+  filter(!is.na(age), !is.na(sex)) |>
+  mutate(age_log_age = age * log(age))
+
+glm_bt <- glm(PR ~ treatment + age + sex + age_log_age,
+              data = df_bt, family = binomial)
+
+bt_coef <- tidy(glm_bt) |> filter(term == "age_log_age")
+cat(sprintf(
+  "Box-Tidwell interaction (age × log(age)): beta = %.4f, p = %.4f\n",
+  bt_coef$estimate, bt_coef$p.value
+))
+```
+
+The Box-Tidwell test is borderline significant (β = 1.48, p = 0.046), suggesting a possible non-linear relationship between age and the log-odds of PR, though the small sample size warrants cautious interpretation.
+
+```{r pr-separation}
+# Check for complete or quasi-complete separation — a common issue with binary outcomes
+# If any cell in the cross-tab is 0, separation may be present
+cat("Cross-tabulation of treatment by PR:\n")
+print(table(df$treatment, df$PR))
+
+cat("\nCross-tabulation of sex by PR:\n")
+print(table(df$sex, df$PR))
+```
+
+All cells are non-zero across both cross-tabulations (minimum cell count = 10), so there is no evidence of complete or quasi-complete separation.
+
+```{r pr-goodness-of-fit}
+# Hosmer-Lemeshow goodness-of-fit test
+# H0: the model fits adequately; p > 0.05 is desired
+hl_test <- hoslem.test(
+  x = glm_pr_main$y,       # 直接从模型对象取，长度保证一致
+  y = fitted(glm_pr_main),
+  g = 10
+)
+cat(sprintf(
+  "Hosmer-Lemeshow test: X² = %.4f, df = %d, p = %.4f\n",
+  hl_test$statistic, hl_test$parameter, hl_test$p.value
+))
+```
+
+The Hosmer-Lemeshow test is non-significant (χ² = 8.61, df = 8, p = 0.376), indicating adequate model fit.
+
+```{r pr-multicollinearity}
+# Variance Inflation Factors for the PR model
+vif_pr <- vif(glm_pr_main)
+cat("VIF values (PR model):\n")
+print(round(vif_pr, 3))
+```
+
+All GVIF^(1/(2·Df)) values are close to 1 (treatment: 1.008, age: 1.071, sex: 1.059), indicating no meaningful multicollinearity.
+
+```{r pr-influential}
+# Cook's distance — identify influential observations
+cooksd_pr <- cooks.distance(glm_pr_main)
+influential_pr <- which(cooksd_pr > 4 / nrow(df))   # common rule of thumb: 4/n
+
+cat(sprintf(
+  "Number of potentially influential observations (Cook's D > 4/n): %d\n",
+  length(influential_pr)
+))
+
+if (length(influential_pr) > 0) {
+  cat("Participant IDs:", paste(df$ID[influential_pr], collapse = ", "), "\n")
+}
+
+# Visualise Cook's distances
+tibble(
+  obs     = seq_along(cooksd_pr),
+  cooksd  = cooksd_pr,
+  flagged = cooksd_pr > 4 / nrow(df)
+) |>
+  ggplot(aes(x = obs, y = cooksd, colour = flagged)) +
+  geom_segment(aes(xend = obs, yend = 0), linewidth = 0.6) +
+  geom_point(size = 2) +
+  geom_hline(yintercept = 4 / nrow(df),
+             linetype = "dashed", colour = "grey40") +
+  scale_colour_manual(values = c(`FALSE` = "#0D7680", `TRUE` = "#E8A838"),
+                      guide  = "none") +
+  labs(
+    title    = "Cook's Distance — PR Logistic Model",
+    subtitle = "Dashed line = 4/n threshold; orange points warrant further inspection",
+    x        = "Observation index",
+    y        = "Cook's distance"
+  ) +
+  theme_ppt
+
+save_ppt_fig("ppt_pr_cooks.png", width = 9, height = 5)
+```
+Seven observations exceed the 4/n threshold (participants 16, 40, 49, 57, 72, 82, 92), with participants 49 and 82 showing the largest Cook's distances. These should be examined for data entry errors, though removal is not recommended without substantive justification.
