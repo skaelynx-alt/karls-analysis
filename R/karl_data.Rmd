@@ -41,11 +41,11 @@ save_ppt_fig <- function(filename, width = 10, height = 6) {
 }
 ```
 
-# The Study
+# The study
 
 The study investigates the effect of three treatments (A, B, C) on AF and PR. Potential covariates include participant age, sex, smoking status, and individual SNP genotypes encoded under an additive genetic model.
 
-# Read in Data
+# Read in sata
 
 The dataset (`FITFR-final-data-v3.xlsx`) contains 100 participants and 58 variables, organised into three broad categories: demographics (`age`, `sex`, `treatment`, `smoker`), genetics (51 SNP variables with the prefix `rs`), and outcome measures (`AF` and `PR`).
 
@@ -268,7 +268,7 @@ cat("Saved to", here("data", "FITFR_clean.csv"))
 
 This involves ‘getting to know’ the data before formal modelling begins—examining **what the data looks like**, **whether there are any missing values**, and **what relationships exist between variables**.
 
-## · Missing Values
+## · Missing values
 
 Missing data were assessed across all variables to determine whether any imputation or case exclusion would be required prior to modelling.
 
@@ -280,7 +280,7 @@ gg_miss_var(df) +
 
 Only `age` contains missing values, with 2 observations recorded as sentinel value −99 and subsequently recoded to `NA` during cleaning. All other variables are complete, so no imputation is necessary.
 
-## · Overview Summary
+## · Overview summary
 
 To obtain an overview of the dataset's structure and the distribution of key variables, we apply `skim()` across the cleaned data frame.
 
@@ -320,7 +320,7 @@ The dataset contains 100 participants and 58 columns, comprising 55 factor varia
 
 To understand the structure of the data, we examine the distribution of all variables, separating continuous variables from categorical ones.
 
-### - Continuous Variables
+### - Continuous variables
 
 The dataset contains two continuous variables of interest: `AF` (the primary outcome) and `age` (a potential covariate).
 
@@ -343,7 +343,7 @@ p1 + p2
 
 According to the distribution plots above, AF is roughly uniformly distributed across its range of approximately 26 to 96, with no strong skew or obvious outliers. Age is similarly spread between 25 and 45, with a slight concentration of participants in the late 20s, consistent with the mean of 34.2 years reported in the summary above.
 
-### - Categorical Variables
+### - Categorical variables
 
 The categorical variables include `treatment` (the primary predictor, with three levels: A, B, C, `sex`, and `PR` (the binary outcome).
 
@@ -395,7 +395,7 @@ Treatment groups differ significantly in AF (p \< 0.001), with group B having th
 kruskal.test(AF ~ treatment, data = df)
 ```
 
-## · Correlation Matrix
+## · Correlation matrix
 
 To assess potential multicollinearity among continuous and genetic variables, we examine pairwise correlations between age, AF, and all SNP variables first using `corrplot`.
 
@@ -1022,7 +1022,7 @@ For PR, one SNP passed the nominal threshold: **rs91154** (p = 0.010, OR = 0.438
 
 Both findings are consistent with the EDA results observed earlier. These two SNPs are carried forward as candidates into the multivariable models, and their effects should be interpreted as exploratory given that they did not survive Bonferroni correction.
 
-## · AF Model
+## · AF model
 
 Three linear regression models are fitted for AF, each building on the previous one.
 
@@ -1084,7 +1084,7 @@ print(lm_af_snp)
 
 **Model 3 (Treatment + age + sex + rs19486)** produces very similar coefficient estimates to Model 2, with rs19486 contributing a near-zero additional effect (β = 0.26). This suggests that rs19486 adds little explanatory value for AF beyond the other predictors already in the model, despite passing the nominal screening threshold.
 
-## · PR Model
+## · PR model
 
 Three logistic regression models are fitted for PR, following the same structure as the AF models. 
 
@@ -1135,7 +1135,7 @@ print(glm_pr_snp)
 
 # Explore models / interpret models
 
-## · AF Model
+## · AF model
 
 ```{r af-model-compare}
 # Compare models using AIC and adjusted R²
@@ -1170,7 +1170,7 @@ confint(lm_af_main)
 
 After adjusting for age and sex, treatment B and C are associated with AF values approximately 35.7 and 34.3 units higher than A respectively (both p < 0.001). Each additional year of age increases AF by ~1.65 units (p < 0.001). Sex has no meaningful effect as we expected. The model explains 97.7% of variance in AF.
 
-## · PR Model
+## · PR model
 
 ```{r pr-model-compare}
 # Compare models using AIC and McFadden's pseudo-R²
@@ -1213,7 +1213,7 @@ After adjusting for age and sex, neither treatment B nor C differs significantly
 
 # Assumption Checking
 
-## · AF: Linear Regression Diagnostics
+## · AF: linear regression diagnostics
 
 Four standard diagnostic plots are examined to assess whether the linear regression assumptions are satisfied: linearity, homoscedasticity (constant variance), normality of residuals, and absence of highly influential observations.
 
@@ -1236,7 +1236,7 @@ print(round(vif_af, 3))
 
 All GVIF^(1/(2·Df)) values are close to 1 (treatment: 1.022, age: 1.058, sex: 1.027), indicating no meaningful multicollinearity among predictors.
 
-## · PR: Logistic Regression Diagnostics
+## · PR: logistic regression diagnostics
 
 Logistic regression assumptions differ from linear regression. We check for linearity, multicollinearity, complete separation, overall goodness of fit, and influential observations.
 
