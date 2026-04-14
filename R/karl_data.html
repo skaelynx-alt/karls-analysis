@@ -2803,6 +2803,87 @@ distances. These should be examined for data entry errors, though
 removal is not recommended without substantive justification.</p>
 </div>
 </div>
+<div id="others" class="section level1">
+<h1>Others</h1>
+<div id="reproduce-jono-plot" class="section level2">
+<h2>Reproduce Jono Plot</h2>
+<pre class="r"><code>whisker_data &lt;- df |&gt;
+  filter(!is.na(AF), !is.na(sex)) |&gt;
+  group_by(treatment, sex) |&gt;
+  mutate(
+    Q1    = quantile(AF, 0.25),
+    Q3    = quantile(AF, 0.75),
+    IQR   = Q3 - Q1,
+    lower = min(AF[AF &gt;= Q1 - 1.5 * IQR]),
+    upper = max(AF[AF &lt;= Q3 + 1.5 * IQR])
+  ) |&gt;
+  filter(AF == lower | AF == upper) |&gt;
+  ungroup()
+
+p &lt;- ggplot(df |&gt; filter(!is.na(AF), !is.na(sex)),
+            aes(x = treatment, y = AF, fill = sex, colour = sex)) +
+  geom_boxplot(
+    aes(group = interaction(treatment, sex)),
+    position      = position_dodge(width = 0.8),
+    width         = 0.6,
+    alpha         = 0.85,
+    color         = &quot;black&quot;
+  ) +
+  stat_summary(
+    aes(group = interaction(treatment, sex)),
+    fun      = mean,
+    geom     = &quot;point&quot;,
+    shape    = 22,
+    size     = 3,
+    fill     = &quot;white&quot;,
+    color    = &quot;black&quot;,
+    position = position_dodge(width = 0.8)
+  ) +
+  geom_text(
+    data        = whisker_data,
+    aes(label   = paste0(&quot;ID: &quot;, ID)),
+    position    = position_dodge(width = 0.8),
+    size        = 3,
+    family      = &quot;Times New Roman&quot;,
+    hjust       = -0.15,
+    show.legend = FALSE
+  ) +
+  scale_fill_manual(values   = c(Female = &quot;#2E86AB&quot;, Male = &quot;#A0522D&quot;)) +
+  scale_colour_manual(values = c(Female = &quot;#2E86AB&quot;, Male = &quot;#A0522D&quot;)) +
+  labs(
+    title    = &quot;Boxplot of AF against treatment&quot;,
+    subtitle = &quot;White squares are sample means&quot;,
+    x        = &quot;Treatment&quot;,
+    y        = &quot;Activating factor&quot;,
+    fill     = &quot;sex&quot;,
+    colour   = &quot;sex&quot;
+  ) +
+  theme_bw(base_size = 13, base_family = &quot;Times New Roman&quot;) +
+  theme(
+    plot.title       = element_text(face = &quot;bold&quot;, family = &quot;Times New Roman&quot;),
+    plot.subtitle    = element_text(family = &quot;Times New Roman&quot;),
+    axis.title       = element_text(family = &quot;Times New Roman&quot;),
+    axis.text        = element_text(family = &quot;Times New Roman&quot;),
+    legend.title     = element_text(family = &quot;Times New Roman&quot;),
+    legend.text      = element_text(family = &quot;Times New Roman&quot;),
+    legend.position  = &quot;top&quot;,
+    panel.grid = element_blank(),
+    panel.border   = element_blank(),
+    axis.line.x    = element_line(colour = &quot;black&quot;),
+    axis.line.y    = element_line(colour = &quot;black&quot;)
+  )
+
+ggsave(
+  filename    = here(&quot;figs&quot;, &quot;af_by_treatment_sex.tiff&quot;),
+  plot        = p,
+  width       = 9,
+  height      = 6,
+  dpi         = 500,
+  device      = &quot;tiff&quot;,
+  compression = &quot;lzw&quot;
+)</code></pre>
+</div>
+</div>
 
 
 

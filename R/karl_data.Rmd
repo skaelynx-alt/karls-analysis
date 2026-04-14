@@ -1334,3 +1334,88 @@ tibble(
 save_ppt_fig("ppt_pr_cooks.png", width = 9, height = 5)
 ```
 Seven observations exceed the 4/n threshold (participants 16, 40, 49, 57, 72, 82, 92), with participants 49 and 82 showing the largest Cook's distances. These should be examined for data entry errors, though removal is not recommended without substantive justification.
+
+
+# Others
+
+## Reproduce Jono Plot
+
+```{r}
+whisker_data <- df |>
+  filter(!is.na(AF), !is.na(sex)) |>
+  group_by(treatment, sex) |>
+  mutate(
+    Q1    = quantile(AF, 0.25),
+    Q3    = quantile(AF, 0.75),
+    IQR   = Q3 - Q1,
+    lower = min(AF[AF >= Q1 - 1.5 * IQR]),
+    upper = max(AF[AF <= Q3 + 1.5 * IQR])
+  ) |>
+  filter(AF == lower | AF == upper) |>
+  ungroup()
+
+p <- ggplot(df |> filter(!is.na(AF), !is.na(sex)),
+            aes(x = treatment, y = AF, fill = sex, colour = sex)) +
+  geom_boxplot(
+    aes(group = interaction(treatment, sex)),
+    position  = position_dodge(width = 1.0),
+    width     = 0.75,
+    color      = "black",
+    linewidth = 0.5
+  ) +
+  stat_summary(
+    aes(group = interaction(treatment, sex)),
+    fun      = mean,
+    geom     = "point",
+    shape    = 22,
+    size     = 4,
+    fill     = "white",
+    color    = "black",
+    position = position_dodge(width = 1.0)
+  ) +
+  geom_point(
+    data     = whisker_data,
+    aes(group = interaction(treatment, sex)),
+    position = position_dodge(width = 1.0),
+    shape    = 21,
+    size     = 1.5,
+    color    = "black"
+  ) +
+  geom_text(
+    data        = whisker_data,
+    aes(label   = paste0("ID: ", ID)),
+    position    = position_dodge(width = 1.0),
+    size        = 4,
+    color       = "black",
+    family      = "Times New Roman",
+    hjust       = -0.15,
+    show.legend = FALSE
+  ) +
+  scale_fill_manual(values = c(Female = "deepskyblue4", Male = "darkorange3")) +
+  scale_colour_manual(values = c(Female = "deepskyblue4", Male = "darkorange3")) +
+  labs(
+    title    = "Boxplot of AF against treatment",
+    subtitle = "White squares are sample means",
+    x        = "Treatment",
+    y        = "Activating factor",
+    fill     = "sex"
+  ) +
+  theme_bw(base_size = 11.5, base_family = "Times New Roman") +
+  theme(
+    legend.position  = "top",
+    panel.grid     = element_blank(),
+    panel.border   = element_blank(),
+    axis.line.x    = element_line(colour = "black"),
+    axis.line.y    = element_line(colour = "black"),
+  )
+ggsave(
+  filename    = here("figs", "karl_plot.tiff"),
+  plot        = p,
+  width       = 9,
+  height      = 6,
+  dpi         = 500,
+  device      = "tiff",
+  compression = "lzw"
+)
+```
+
