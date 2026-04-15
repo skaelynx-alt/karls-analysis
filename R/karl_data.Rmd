@@ -1398,6 +1398,7 @@ p <- ggplot(df |> filter(!is.na(AF), !is.na(sex)),
     subtitle = "White squares are sample means",
     x        = "Treatment",
     y        = "Activating factor",
+    caption  = "Produced by Kailin",
     fill     = "sex"
   ) +
   theme_bw(base_size = 11.5, base_family = "Times New Roman") +
@@ -1417,5 +1418,6 @@ ggsave(
   device      = "tiff",
   compression = "lzw"
 )
+p
 ```
 
