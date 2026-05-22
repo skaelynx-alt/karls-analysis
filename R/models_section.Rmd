@@ -1,0 +1,474 @@
+# Models
+
+Based on the EDA findings, two separate models are fitted to address the two outcomes of interest:
+
+- **AF** (continuous): multiple linear regression
+- **PR** (binary): logistic regression
+
+Both models follow the same structure: a baseline model with treatment only, followed by a main-effects model adding age and sex as covariates, and finally a SNP-augmented model incorporating the top genetic candidates identified during EDA. Smoking status and `rs123456` are excluded from all models as zero-variance variables.
+
+## · SNP candidate pre-screening
+
+Before formal modelling, we screen all 50 SNPs using univariable regression to identify candidates for inclusion. This avoids overfitting a 100-observation dataset with 51 predictors simultaneously.
+
+```{r snp-screen}
+snp_cols_model <- names(df)[str_detect(names(df), "^rs") & names(df) != "rs123456"]
+
+# --- AF: univariable linear regression for each SNP ---
+snp_screen_af <- tibble(
+  SNP  = snp_cols_model,
+  p    = sapply(snp_cols_model, function(s) {
+    summary(lm(AF ~ as.numeric(df[[s]]), data = df))$coefficients[2, 4]
+  }),
+  beta = sapply(snp_cols_model, function(s) {
+    coef(lm(AF ~ as.numeric(df[[s]]), data = df))[2]
+  })
+) |>
+  arrange(p) |>
+  mutate(bonferroni = p < 0.05 / n(),          # Bonferroni-corrected threshold
+         nominal    = p < 0.05)
+
+cat("SNPs passing Bonferroni threshold (AF):", sum(snp_screen_af$bonferroni), "\n")
+cat("SNPs passing nominal p < 0.05 (AF):",    sum(snp_screen_af$nominal),    "\n")
+print(head(snp_screen_af, 10))
+
+# --- PR: univariable logistic regression for each SNP ---
+pr_num <- as.numeric(df$PR) - 1   # recode to 0/1
+
+snp_screen_pr <- tibble(
+  SNP  = snp_cols_model,
+  p    = sapply(snp_cols_model, function(s) {
+    summary(glm(pr_num ~ as.numeric(df[[s]]),
+                family = binomial))$coefficients[2, 4]
+  }),
+  OR   = sapply(snp_cols_model, function(s) {
+    exp(coef(glm(pr_num ~ as.numeric(df[[s]]),
+                 family = binomial))[2])
+  })
+) |>
+  arrange(p) |>
+  mutate(bonferroni = p < 0.05 / n(),
+         nominal    = p < 0.05)
+
+cat("\nSNPs passing Bonferroni threshold (PR):", sum(snp_screen_pr$bonferroni), "\n")
+cat("SNPs passing nominal p < 0.05 (PR):",    sum(snp_screen_pr$nominal),    "\n")
+print(head(snp_screen_pr, 10))
+```
+
+```{r snp-candidates}
+# Retain SNPs that pass the nominal threshold (p < 0.05) for inclusion in the
+# augmented models. If none pass Bonferroni, we use nominal significance and
+# note this as exploratory.
+top_snps_af <- snp_screen_af |> filter(nominal) |> pull(SNP)
+top_snps_pr <- snp_screen_pr |> filter(nominal) |> pull(SNP)
+
+cat("Top AF SNP candidates:", paste(top_snps_af, collapse = ", "), "\n")
+cat("Top PR SNP candidates:", paste(top_snps_pr, collapse = ", "), "\n")
+```
+
+---
+
+## · Outcome 1: AF — Multiple Linear Regression
+
+AF is a continuous outcome. Multiple linear regression is used to estimate the effect of treatment on AF after adjusting for age, sex, and candidate SNPs.
+
+```{r af-model-fit}
+# Model 0: intercept only (for reference R²)
+lm_af_null <- lm(AF ~ 1, data = df)
+
+# Model 1: treatment only
+lm_af_base <- lm(AF ~ treatment, data = df)
+
+# Model 2: treatment + age + sex
+lm_af_main <- lm(AF ~ treatment + age + sex, data = df)
+
+# Model 3: treatment + age + sex + top SNP candidates
+# Build the formula dynamically from the screened candidates
+if (length(top_snps_af) > 0) {
+  snp_terms_af <- paste(
+    sprintf("as.numeric(%s)", top_snps_af),
+    collapse = " + "
+  )
+  lm_af_snp <- lm(
+    as.formula(paste("AF ~ treatment + age + sex +", snp_terms_af)),
+    data = df
+  )
+} else {
+  # If no SNPs pass screening, fall back to the main-effects model
+  lm_af_snp <- lm_af_main
+  cat("No SNPs passed nominal screening for AF — SNP model = main-effects model.\n")
+}
+```
+
+```{r af-model-compare}
+# Compare models using AIC and adjusted R²
+model_compare_af <- tibble(
+  Model       = c("Null", "Treatment only", "Main effects", "Main + SNPs"),
+  AIC         = c(AIC(lm_af_null), AIC(lm_af_base),
+                  AIC(lm_af_main), AIC(lm_af_snp)),
+  Adj_R2      = c(
+    summary(lm_af_null)$adj.r.squared,
+    summary(lm_af_base)$adj.r.squared,
+    summary(lm_af_main)$adj.r.squared,
+    summary(lm_af_snp)$adj.r.squared
+  )
+) |>
+  mutate(across(where(is.numeric), ~ round(.x, 3)))
+
+print(model_compare_af)
+
+# ANOVA to formally test whether adding covariates improves fit
+anova(lm_af_base, lm_af_main, lm_af_snp)
+```
+
+```{r af-model-summary}
+# Full summary of the selected main-effects model
+summary(lm_af_main)
+
+# 95% confidence intervals for all coefficients
+confint(lm_af_main)
+```
+
+```{r af-coef-plot}
+# Coefficient plot: visualise point estimates and 95% CIs for the main model
+library(broom)
+
+tidy(lm_af_main, conf.int = TRUE) |>
+  filter(term != "(Intercept)") |>
+  mutate(
+    term = recode(term,
+      treatmentB = "Treatment B vs A",
+      treatmentC = "Treatment C vs A",
+      age        = "Age",
+      sexMale    = "Sex (Male vs Female)"
+    ),
+    term      = fct_reorder(term, estimate),
+    direction = if_else(estimate > 0, "Positive", "Negative")
+  ) |>
+  ggplot(aes(x = estimate, y = term,
+             xmin = conf.low, xmax = conf.high, colour = direction)) +
+  geom_pointrange(size = 0.9, linewidth = 1) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey50") +
+  scale_colour_manual(values = c(Positive = "#0D7680", Negative = "#E8A838")) +
+  labs(
+    title    = "Linear Regression Coefficients: AF",
+    subtitle = "Point estimate ± 95% CI  ·  Reference: Treatment A, Female",
+    x        = "Estimated effect on AF",
+    y        = NULL
+  ) +
+  theme_ppt +
+  theme(legend.position = "none")
+
+save_ppt_fig("ppt_af_coef_plot.png", width = 9, height = 5)
+```
+
+```{r af-model-interpret}
+# Extract key numbers for inline reporting
+af_coefs <- tidy(lm_af_main, conf.int = TRUE)
+
+# Treatment B vs A
+b_vs_a <- af_coefs |> filter(term == "treatmentB")
+cat(sprintf(
+  "Treatment B vs A: beta = %.2f (95%% CI: %.2f to %.2f), p = %.4f\n",
+  b_vs_a$estimate, b_vs_a$conf.low, b_vs_a$conf.high, b_vs_a$p.value
+))
+
+# Treatment C vs A
+c_vs_a <- af_coefs |> filter(term == "treatmentC")
+cat(sprintf(
+  "Treatment C vs A: beta = %.2f (95%% CI: %.2f to %.2f), p = %.4f\n",
+  c_vs_a$estimate, c_vs_a$conf.low, c_vs_a$conf.high, c_vs_a$p.value
+))
+
+# Age
+age_coef <- af_coefs |> filter(term == "age")
+cat(sprintf(
+  "Age: beta = %.2f (95%% CI: %.2f to %.2f), p = %.4f\n",
+  age_coef$estimate, age_coef$conf.low, age_coef$conf.high, age_coef$p.value
+))
+```
+
+---
+
+## · Outcome 2: PR — Logistic Regression
+
+PR is a binary outcome (yes/no). Logistic regression is used to model the log-odds of a positive response as a function of treatment, adjusting for age, sex, and candidate SNPs.
+
+```{r pr-model-fit}
+# Model 1: treatment only
+glm_pr_base <- glm(PR ~ treatment, data = df, family = binomial)
+
+# Model 2: treatment + age + sex
+glm_pr_main <- glm(PR ~ treatment + age + sex, data = df, family = binomial)
+
+# Model 3: treatment + age + sex + top SNP candidates
+if (length(top_snps_pr) > 0) {
+  snp_terms_pr <- paste(
+    sprintf("as.numeric(%s)", top_snps_pr),
+    collapse = " + "
+  )
+  glm_pr_snp <- glm(
+    as.formula(paste("PR ~ treatment + age + sex +", snp_terms_pr)),
+    data    = df,
+    family  = binomial
+  )
+} else {
+  glm_pr_snp <- glm_pr_main
+  cat("No SNPs passed nominal screening for PR — SNP model = main-effects model.\n")
+}
+```
+
+```{r pr-model-compare}
+# Compare models using AIC and McFadden's pseudo-R²
+mcfadden_r2 <- function(model) {
+  1 - (logLik(model) / logLik(update(model, . ~ 1)))
+}
+
+model_compare_pr <- tibble(
+  Model        = c("Treatment only", "Main effects", "Main + SNPs"),
+  AIC          = c(AIC(glm_pr_base), AIC(glm_pr_main), AIC(glm_pr_snp)),
+  McFadden_R2  = c(
+    as.numeric(mcfadden_r2(glm_pr_base)),
+    as.numeric(mcfadden_r2(glm_pr_main)),
+    as.numeric(mcfadden_r2(glm_pr_snp))
+  )
+) |>
+  mutate(across(where(is.numeric), ~ round(.x, 3)))
+
+print(model_compare_pr)
+
+# Likelihood ratio test
+anova(glm_pr_base, glm_pr_main, glm_pr_snp, test = "LRT")
+```
+
+```{r pr-model-summary}
+# Full summary of the selected main-effects model
+summary(glm_pr_main)
+
+# Odds ratios and 95% CIs (exponentiate log-odds coefficients)
+or_table <- tidy(glm_pr_main, conf.int = TRUE, exponentiate = TRUE) |>
+  filter(term != "(Intercept)") |>
+  mutate(across(c(estimate, conf.low, conf.high, p.value), ~ round(.x, 4)))
+
+print(or_table)
+```
+
+```{r pr-or-plot}
+# Forest-plot style OR visualisation
+tidy(glm_pr_main, conf.int = TRUE, exponentiate = TRUE) |>
+  filter(term != "(Intercept)") |>
+  mutate(
+    term = recode(term,
+      treatmentB = "Treatment B vs A",
+      treatmentC = "Treatment C vs A",
+      age        = "Age",
+      sexMale    = "Sex (Male vs Female)"
+    ),
+    term      = fct_reorder(term, estimate),
+    direction = if_else(estimate > 1, "Positive", "Negative")
+  ) |>
+  ggplot(aes(x = estimate, y = term,
+             xmin = conf.low, xmax = conf.high, colour = direction)) +
+  geom_pointrange(size = 0.9, linewidth = 1) +
+  geom_vline(xintercept = 1, linetype = "dashed", colour = "grey50") +
+  scale_colour_manual(values = c(Positive = "#0D7680", Negative = "#E8A838")) +
+  scale_x_log10() +   # log scale so CIs are symmetric around OR = 1
+  labs(
+    title    = "Logistic Regression: Odds Ratios for PR",
+    subtitle = "Point estimate ± 95% CI  ·  Reference: Treatment A, Female  ·  log scale",
+    x        = "Odds Ratio (log scale)",
+    y        = NULL
+  ) +
+  theme_ppt +
+  theme(legend.position = "none")
+
+save_ppt_fig("ppt_pr_or_plot.png", width = 9, height = 5)
+```
+
+```{r pr-model-interpret}
+# Extract key OR values for inline reporting
+pr_or <- tidy(glm_pr_main, conf.int = TRUE, exponentiate = TRUE)
+
+b_or <- pr_or |> filter(term == "treatmentB")
+cat(sprintf(
+  "Treatment B vs A: OR = %.2f (95%% CI: %.2f to %.2f), p = %.4f\n",
+  b_or$estimate, b_or$conf.low, b_or$conf.high, b_or$p.value
+))
+
+c_or <- pr_or |> filter(term == "treatmentC")
+cat(sprintf(
+  "Treatment C vs A: OR = %.2f (95%% CI: %.2f to %.2f), p = %.4f\n",
+  c_or$estimate, c_or$conf.low, c_or$conf.high, c_or$p.value
+))
+
+age_or <- pr_or |> filter(term == "age")
+cat(sprintf(
+  "Age: OR = %.2f (95%% CI: %.2f to %.2f), p = %.4f\n",
+  age_or$estimate, age_or$conf.low, age_or$conf.high, age_or$p.value
+))
+```
+
+---
+
+# Assumption Checking
+
+## · AF: Linear Regression Diagnostics
+
+Four standard diagnostic plots are examined to assess whether the linear regression assumptions are satisfied: linearity, homoscedasticity (constant variance), normality of residuals, and absence of highly influential observations.
+
+```{r af-diagnostics, fig.height=8, fig.width=10}
+# Base R diagnostic plots (Residuals vs Fitted, Q-Q, Scale-Location, Cook's D)
+par(mfrow = c(2, 2))
+plot(lm_af_main, which = 1:4)
+par(mfrow = c(1, 1))
+```
+
+```{r af-normality}
+# Shapiro-Wilk test for normality of residuals
+shapiro_af <- shapiro.test(residuals(lm_af_main))
+cat(sprintf(
+  "Shapiro-Wilk test: W = %.4f, p = %.4f\n",
+  shapiro_af$statistic, shapiro_af$p.value
+))
+
+# Residuals vs fitted — ggplot version for cleaner presentation
+augment(lm_af_main) |>
+  ggplot(aes(x = .fitted, y = .resid)) +
+  geom_point(alpha = 0.5, colour = "#0D7680", size = 2) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey40") +
+  geom_smooth(method = "loess", se = FALSE, colour = "#E8A838", linewidth = 1) +
+  labs(
+    title    = "Residuals vs Fitted — AF Linear Model",
+    subtitle = "No systematic pattern expected under correct model specification",
+    x        = "Fitted values",
+    y        = "Residuals"
+  ) +
+  theme_ppt
+
+save_ppt_fig("ppt_af_resid_vs_fitted.png", width = 9, height = 5)
+```
+
+```{r af-qq}
+# Q-Q plot of residuals
+augment(lm_af_main) |>
+  ggplot(aes(sample = .resid)) +
+  stat_qq(colour = "#0D7680", alpha = 0.7, size = 2) +
+  stat_qq_line(colour = "#E8A838", linewidth = 1) +
+  labs(
+    title    = "Normal Q-Q Plot — AF Residuals",
+    subtitle = "Points should fall close to the line if residuals are normally distributed",
+    x        = "Theoretical quantiles",
+    y        = "Sample quantiles"
+  ) +
+  theme_ppt
+
+save_ppt_fig("ppt_af_qq.png", width = 8, height = 6)
+```
+
+```{r af-multicollinearity}
+# Variance Inflation Factors — check for multicollinearity among predictors
+library(car)
+vif_af <- vif(lm_af_main)
+cat("VIF values (AF model):\n")
+print(round(vif_af, 3))
+# VIF > 10 (or conservatively > 5) indicates a problematic level of collinearity
+```
+
+---
+
+## · PR: Logistic Regression Diagnostics
+
+Logistic regression assumptions differ from linear regression. We check for multicollinearity, complete separation, overall goodness of fit, and influential observations.
+
+```{r pr-separation}
+# Check for complete or quasi-complete separation — a common issue with binary outcomes
+# If any cell in the cross-tab is 0, separation may be present
+cat("Cross-tabulation of treatment by PR:\n")
+print(table(df$treatment, df$PR))
+
+cat("\nCross-tabulation of sex by PR:\n")
+print(table(df$sex, df$PR))
+```
+
+```{r pr-goodness-of-fit}
+# Hosmer-Lemeshow goodness-of-fit test
+# H0: the model fits adequately; p > 0.05 is desired
+library(ResourceSelection)
+hl_test <- hoslem.test(
+  x = as.numeric(df$PR) - 1,
+  y = fitted(glm_pr_main),
+  g = 10    # number of groups; g = 10 is the standard recommendation
+)
+cat(sprintf(
+  "Hosmer-Lemeshow test: X² = %.4f, df = %d, p = %.4f\n",
+  hl_test$statistic, hl_test$parameter, hl_test$p.value
+))
+```
+
+```{r pr-multicollinearity}
+# Variance Inflation Factors for the PR model
+vif_pr <- vif(glm_pr_main)
+cat("VIF values (PR model):\n")
+print(round(vif_pr, 3))
+```
+
+```{r pr-influential}
+# Cook's distance — identify influential observations
+cooksd_pr <- cooks.distance(glm_pr_main)
+influential_pr <- which(cooksd_pr > 4 / nrow(df))   # common rule of thumb: 4/n
+
+cat(sprintf(
+  "Number of potentially influential observations (Cook's D > 4/n): %d\n",
+  length(influential_pr)
+))
+
+if (length(influential_pr) > 0) {
+  cat("Participant IDs:", paste(df$ID[influential_pr], collapse = ", "), "\n")
+}
+
+# Visualise Cook's distances
+tibble(
+  obs     = seq_along(cooksd_pr),
+  cooksd  = cooksd_pr,
+  flagged = cooksd_pr > 4 / nrow(df)
+) |>
+  ggplot(aes(x = obs, y = cooksd, colour = flagged)) +
+  geom_segment(aes(xend = obs, yend = 0), linewidth = 0.6) +
+  geom_point(size = 2) +
+  geom_hline(yintercept = 4 / nrow(df),
+             linetype = "dashed", colour = "grey40") +
+  scale_colour_manual(values = c(`FALSE` = "#0D7680", `TRUE` = "#E8A838"),
+                      guide  = "none") +
+  labs(
+    title    = "Cook's Distance — PR Logistic Model",
+    subtitle = "Dashed line = 4/n threshold; orange points warrant further inspection",
+    x        = "Observation index",
+    y        = "Cook's distance"
+  ) +
+  theme_ppt
+
+save_ppt_fig("ppt_pr_cooks.png", width = 9, height = 5)
+```
+
+```{r pr-predicted-prob}
+# Visualise predicted probabilities by treatment group
+# This helps communicate model output to a non-statistical audience
+df |>
+  filter(!is.na(age), !is.na(sex)) |>
+  mutate(pred_prob = predict(glm_pr_main, type = "response")) |>
+  ggplot(aes(x = treatment, y = pred_prob, fill = treatment)) +
+  geom_boxplot(alpha = 0.8, width = 0.5) +
+  geom_jitter(width = 0.1, alpha = 0.4, size = 1.5) +
+  scale_fill_manual(values = trt_colours) +
+  scale_y_continuous(labels = scales::percent, limits = c(0, 1)) +
+  labs(
+    title    = "Predicted Probability of PR by Treatment Group",
+    subtitle = "From logistic regression model adjusted for age and sex",
+    x        = "Treatment",
+    y        = "Predicted P(PR = yes)"
+  ) +
+  theme_ppt +
+  theme(legend.position = "none")
+
+save_ppt_fig("ppt_pr_predicted_prob.png", width = 8, height = 6)
+```

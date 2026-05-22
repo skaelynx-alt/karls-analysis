@@ -1392,7 +1392,7 @@ p <- ggplot(df |> filter(!is.na(AF), !is.na(sex)),
     show.legend = FALSE
   ) +
   scale_fill_manual(values = c(Female = "deepskyblue4", Male = "darkorange3")) +
-  scale_colour_manual(values = c(Female = "deepskyblue4", Male = "darkorange3")) +
+  scale_colour_manual(values = c(Female = "deepskyblue4", Male = "darkorange3"), ) +
   labs(
     title    = "Boxplot of AF against treatment",
     subtitle = "White squares are sample means",
@@ -1421,3 +1421,21 @@ ggsave(
 p
 ```
 
+# Reference
+
+```{r}
+#| label: citations
+#| include: false
+
+citation("tidyverse")
+citation("readxl")
+citation("skimr")
+citation("inspectdf")
+citation("naniar")
+citation("corrplot")
+citation("broom")
+citation("ResourceSelection")
+citation("car")
+citation("table1")
+citation()
+```

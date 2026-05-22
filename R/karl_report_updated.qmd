@@ -1,0 +1,1057 @@
+---
+# title: "FITFR Analysis Report"
+# author: "Kailin"
+# date: today
+format:
+  pdf:
+    documentclass: article
+    number-sections: false
+    toc: true
+    toc-depth: 2
+    keep-tex: false
+    geometry: margin=2.5cm
+    code-overflow: wrap
+    include-before-body:
+      text: |
+        \begin{titlepage}
+        \centering
+        \vspace*{3cm}
+        {\huge STAT 4001\par}
+        {\huge Topics in Data Science A\par}
+        \vspace{2cm}
+        {\Huge\bfseries FITFR Analysis Report\par}
+        \vspace{10cm}
+        {\Large Kailin Xue\par}
+        \vspace{1cm}
+        {\large May 2026\par}
+        \vfill
+        \end{titlepage}
+execute:
+  echo: false
+  warning: false
+  message: false
+bibliography: references.bib
+---
+
+{{< pagebreak >}}
+
+# Introduction
+
+```{r include=FALSE}
+# PACKAGES
+pacman::p_load(tidyverse, readxl, table1, patchwork, scales, broom, ResourceSelection, 
+               car, kableExtra, here)
+
+# COLORS
+trt_colours <- c(A = "#0D7680", B = "#E8A838", C = "#A06030")
+
+```
+
+```{r}
+# READ IN DATA
+df_fitfr_raw <- read_excel(here("raw-data", "FITFR-final-data-v3.xlsx"), sheet = 1, skip = 1)
+df_extra_raw <- read_excel(here("raw-data", "FITFR-extra-data.xlsx"), sheet = 1)
+
+# FIX TYPE MISMATCH & MERGE
+df_fitfr_raw <- df_fitfr_raw |> mutate(across(everything(), as.character))
+df_extra_raw <- df_extra_raw |> mutate(across(everything(), as.character))
+df_fitfr_raw <- bind_rows(df_fitfr_raw, df_extra_raw)
+```
+
+In biomedical and clinical research, treatment effectiveness often varies substantially between individuals due to demographic, behavioural, and genetic differences. Factors such as age, sex, smoking status, and genetic variation may independently influence biological responses, making it difficult to determine whether observed treatment effects are truly attributable to the treatment itself. Consequently, adjusting for potential confounding variables is an important component of treatment-response analysis and helps improve the reliability and interpretability of statistical conclusions.
+
+The dataset used in this study was provided by a research collaborator and consisted of 110 participants with 58 recorded variables. The study focused on two primary outcome variables. The first outcome, AF (activating factor), was a continuous variable ranging from 26.0 to 96.0. The second outcome, PR (positive response), was a binary variable indicating whether a participant exhibited a positive treatment response (“yes” or “no”).
+
+The primary explanatory variable of interest was treatment group assignment, with participants allocated to one of three treatment groups: A, B, or C. In addition, several potential covariates were recorded, including age, sex, smoking status, and 51 SNP (single nucleotide polymorphism) genetic markers. These variables were incorporated to account for demographic, behavioural, and genetic sources of variation that may influence AF and PR outcomes independently of treatment effects.
+
+The primary research question was whether treatment group was significantly associated with AF and PR after adjusting for these potential confounding factors. Since AF is continuous and PR is binary, different statistical modelling approaches are required to appropriately analyse each outcome type. The analysis therefore aimed not only to assess treatment effectiveness, but also to determine whether observed differences in biological response outcomes could reasonably be attributed to treatment effects rather than underlying demographic or genetic variation between participants.
+
+Understanding which treatment most effectively influences AF and PR may provide insight into treatment selection and the role of demographic and genetic factors in biological response variability. More broadly, the findings may contribute to improving the interpretation of treatment-response studies and informing the design of future clinical or experimental research.
+
+# Methods
+
+## Data Cleaning and Pre-processing
+
+The primary data file contained a two-row header structure, with the first row containing broad category labels and the second containing variable names; the first row was skipped on import. A supplementary data file containing an additional 10 participants was read in separately and merged with the primary data prior to cleaning. The last four rows of the primary file were artefacts (three empty rows and one garbled header fragment) and were removed by filtering on non-missing participant ID, as all genuine participants have a valid ID.
+
+```{r}
+# REMOVE JUNK ROWS
+df_fitfr <- df_fitfr_raw |> 
+  filter(!is.na(ID))
+
+```
+
+Upon import, all columns in both files were coerced to character type prior to merging to ensure compatibility. The following type conversions were applied after merging:
+
+- `ID` and `age` were coerced to integer and numeric respectively; `AF` was confirmed to be numeric.
+- `sex` was recoded to be consistent Female/Male (correcting capitalisation and abbreviation of "M") and then factorised.
+- `treatment` was uppercased (from a/b/c to A/B/C) and then factorised with reference level A.
+- `PR` was recoded from yes/no strings to a binary factor (0 = no, 1 = yes).
+
+```{r}
+# CLEAN & RECODE VARIABLES
+df_fitfr <- df_fitfr |>
+  mutate(
+    ID        = as.integer(ID),
+    age       = as.numeric(age) |> na_if(-99),
+    AF        = as.numeric(AF),
+    sex       = factor(case_when(
+                  str_to_lower(sex) == "female"         ~ "Female",
+                  str_to_lower(sex) %in% c("male", "m") ~ "Male"),
+                  levels = c("Female", "Male")),
+    treatment = factor(str_to_upper(treatment), levels = c("A", "B", "C")),
+    smoker    = factor(smoker, levels = "N"),
+    PR        = factor(case_when(
+                  str_to_lower(PR) == "yes" ~ 1L,
+                  str_to_lower(PR) == "no"  ~ 0L),
+                  levels = c(0, 1), labels = c("no", "yes"))
+  )
+
+```
+
+Two participants had `age = -99`, a sentinel value indicating missing data; these were recoded to `NA`. These two observations were excluded from model fitting, leaving an analytic sample of 108 participants. No other variables contained missing values.
+
+One zero-variance variable was identified and excluded from all models: `smoker` (all participants were non-smokers). `rs123456`, previously monomorphic in the original 100 participants (all carrying the CC genotype), showed variation following inclusion of the additional 10 participants and was therefore retained in SNP screening. This variable was retained in the cleaned dataset for transparency.
+
+All 51 SNP variables were encoded under a standard additive genetic model. For each SNP, the reference allele was determined as the allele present in the most frequent homozygous genotype. Each participant's genotype was then recoded as the count of alternate alleles carried (0 = homozygous reference, 1 = heterozygous, 2 = homozygous alternate). Encoded SNP values were stored as ordered factors with levels 0 \< 1 \< 2.
+
+```{r}
+# SNP ENCODING
+snp_cols <- names(df_fitfr)[str_detect(names(df_fitfr), "^rs")]
+
+encode_snp <- function(x) {
+  x       <- as.character(x)
+  genos   <- na.omit(unique(x))
+  homozyg <- genos[substr(genos, 1, 1) == substr(genos, 2, 2)]
+  if (length(homozyg) < 1) return(factor(x))
+  counts      <- table(x[x %in% homozyg])
+  ref_allele  <- substr(names(which.max(counts)), 1, 1)
+  alt_alleles <- setdiff(unique(unlist(strsplit(genos, ""))), ref_allele)
+  count_alt   <- function(g) sum(strsplit(g, "")[[1]] %in% alt_alleles)
+  coded       <- sapply(x, function(g) if (is.na(g)) NA_integer_ else count_alt(g))
+  factor(coded, levels = c(0, 1, 2), ordered = TRUE)
+}
+
+df_fitfr[snp_cols] <- lapply(df_fitfr[snp_cols], encode_snp)
+
+```
+
+## Statistical Models
+
+Two separate models were fitted to address the two outcomes of interest.
+
+**Activating factor (AF) was modelled using multiple linear regression.** Linear regression was chosen as AF is a continuous variable with no natural bounds in this context, and the distribution of AF within treatment groups showed no severe skew. The full model takes the form:
+
+$$AF_i = \beta_0 + \beta_1 \text{Treatment}_i + \beta_2 \text{Age}_i + \beta_3 \text{Sex}_i + \beta_4 \text{SNP}_i + \epsilon_i, \quad \epsilon_i \sim \mathcal{N}(0, \sigma^2)$$
+
+where $\beta_0$ is the intercept, $\beta_1$, $\beta_2$, $\beta_3$, and $\beta_4$ are the coefficients for treatment, age, sex, and SNP dosage respectively, and $\epsilon_i$ is the residual error assumed to be independently and normally distributed with mean zero and constant variance $\sigma^2$. The baseline and main effects models are nested special cases, obtained by setting $\beta_4 = 0$ and $\beta_2 = \beta_3 = \beta_4 = 0$ respectively. Coefficients can be interpreted as differences in AF units themselves. Robust regression was explored but found unnecessary due to a very high model fit (adjusted R² = 0.977). Log transformation of AF was also considered but not applied, as the within-group distributions were approximately symmetric.
+
+**Positive response (PR) was modelled using logistic regression.** Logistic regression was chosen as PR is a binary outcome. Standard linear regression was considered but rejected as it can produce predicted probabilities outside [0, 1] and assumes linearity on the raw scale. The full model takes the form:
+
+$$\log\left(\frac{p_i}{1 - p_i}\right) = \beta_0 + \beta_1 \text{Treatment}_i + \beta_2 \text{Age}_i + \beta_3 \text{Sex}_i + \beta_4 \text{SNP}_i$$
+
+where $p_i = P(\text{PR}_i = \text{yes})$ is the probability of a positive response for participant $i$, and the left-hand side is the log-odds of PR. As with the AF model, the baseline and main effects models are nested special cases obtained by setting $\beta_4 = 0$ and $\beta_2 = \beta_3 = \beta_4 = 0$ respectively. Coefficients are exponentiated to produce odds ratios, representing the multiplicative change in the odds of PR per unit increase in each predictor. Probit regression was also considered; as it yields conclusions consistent with logistic regression in practice, logistic regression was preferred for its more interpretable odds ratio parameterisation.
+
+Both models followed the same nested structure, with each subsequent model adding a further set of predictors to assess their incremental contribution:
+
+1. **Baseline model**: treatment only.
+2. **Main effects model**: treatment + age + sex.
+3. **SNP-augmented model**: treatment + age + sex + top SNP candidate(s).
+
+Smoking status was excluded from all models as a zero-variance variable.
+
+## Model Selection and Tuning
+
+For each outcome, the three nested models were compared sequentially, where each successive model contains all predictors from the previous model plus an additional set of predictors.
+
+**AF**: Models were compared using AIC and adjusted R², with ANOVA F-tests used to formally assess whether each additional set of predictors significantly improved model fit. A difference in AIC of less than 2 between successive models was treated as negligible evidence in favour of the more complex model, in which case the simpler model was preferred.
+
+**PR**: Models were compared using AIC and McFadden's pseudo-R², with likelihood ratio tests used to formally assess improvement in fit. The same AIC decision rule was applied.
+
+## Assumption Checking
+
+For the **AF linear regression model**, four standard diagnostics were examined: a residuals vs fitted plot (linearity and homoscedasticity), a Q-Q plot (normality of residuals), a scale-location plot (constant variance), and Cook's distance (influential observations). Variance inflation factors (VIF) were computed to assess multicollinearity, with GVIF\^(1/(2·Df)) \> 2 used as the threshold for concern.
+
+For the **PR logistic regression model**, the following diagnostics were applied:
+
+-   **Linearity**: Box-Tidwell test, assessing whether the log-odds of PR is linear in age via an age × log(age) interaction term.
+-   **Complete separation**: cross-tabulations of each categorical predictor against PR, with any zero cell count indicating separation.
+-   **Goodness of fit**: Hosmer-Lemeshow test (g = 10 groups), with p \> 0.05 indicating adequate fit.
+-   **Multicollinearity**: VIF as above.
+-   **Influential observations**: Cook's distance with threshold 4/n.
+
+## SNP Candidate Selection
+
+With 110 participants and 51 SNPs, simultaneously including all SNPs would violate the events per variable (EPV) rule of thumb, which recommends a minimum of 10 observations per predictor for stable regression estimates [@peduzzi1996].
+
+Two approaches were considered for reducing the dimensionality of the SNP data prior to modelling.
+
+Principal component analysis (PCA) was explored as a means of summarising genetic variation into a smaller number of uncorrelated components; however, this approach was not carried forward as the resulting components are linear combinations of all SNPs and cannot be interpreted in terms of individual genetic variants, which is of primary interest here.
+
+Univariable regression screening was therefore adopted instead, as it places each SNP on the same inferential scale as the final model and retains the direct interpretability of individual SNP effects. For each of the 50 SNPs, a separate univariable model was fitted with SNP dosage (0, 1, 2) as the sole predictor: a linear regression for AF and a logistic regression for PR. The p-value for the SNP coefficient in each model was extracted, representing the probability of observing an association of that magnitude or greater under the null hypothesis of no SNP effect.
+
+Two thresholds were assessed:
+
+-   A SNP was considered to pass the Bonferroni-corrected threshold if its p-value was less than 0.001, calculated as 0.05 divided by the total number of tests to control the familywise error rate across all simultaneous comparisons.
+-   A SNP was considered to pass the nominal threshold if its p-value was less than 0.05.
+
+SNPs were ranked by p-value and those passing the nominal threshold were carried forward into the multivariable models as exploratory candidates. As no SNPs survived Bonferroni correction, which is expected given the limited statistical power with only 100 participants, all SNP findings are treated as preliminary and should be interpreted with caution. 
+
+## Software
+
+All analyses were conducted in R version 4.5.2 [@base2025]. The following packages were used: tidyverse version 2.0.0 [@tidyverse2019] for data manipulation and visualisation, readxl version 1.4.5 [@readxl2025] for data import, table1 [@table12025] for descriptive statistics, patchwork [@patchwork2025] for figure composition, scales [@scales2025] for axis formatting, broom version 1.0.12 [@broom2026] for tidy model output, ResourceSelection version 0.3-6 [@ResourceSelection2023] for the Hosmer-Lemeshow test, car version 3.1-5 [@car2019] for variance inflation factors, and kableExtra [@kableExtra2024] for table formatting. Package versions are reported in the session information appended to this document.
+
+# Result
+
+## Descriptive Statistics
+
+@tbl-table1 summarises participant characteristics stratified by treatment group. The three groups were reasonably balanced in sex distribution, unadjusted PR rate, and age (p = 0.137), but differed significantly in AF (p < 0.001). Group B had the highest mean AF at 75.5 (SD = 11.6), followed by group C at 69.8 (SD = 13.4) and group A at 37.5 (SD = 6.27), with the gap between group A and the other two groups being particularly pronounced. Groups were similar in mean age at 34.3, 35.6, and 32.7 years for groups A, B, and C respectively.
+
+```{r}
+#| label: tbl-table1
+#| tbl-pos: H
+#| tbl-cap: "Descriptive statistics stratified by treatment group (A, B, C) for 110 participants. Continuous variables are presented as mean (SD); categorical variables as n (%). Treatment groups differ significantly in AF (p < 0.001), but not in age (p = 0.137), sex, or PR distribution."
+
+# TABLE 1
+table1(
+  ~ age + sex + AF + PR | treatment,
+  data = df_fitfr
+)
+```
+
+The distribution of continuous variables is shown in @fig-num-dist. AF was approximately uniformly distributed across its observed range of 26.0 to 96.0, with a mean of 61.8 (SD = 19.5) and no severe skew or obvious multimodality. Age ranged from 25 to 45 years with a mean of 34.0 (SD = 6.25); two observations originally recorded as the sentinel value −99 were recoded to missing prior to analysis. Among the categorical variables (@fig-cat-dist), treatment group C had the largest number of participants at 45, followed by A at 33 and B at 32. Sex was evenly split at 55 female and 55 male participants, and the PR outcome was nearly balanced between positive and negative responses (56 vs 54), indicating no class imbalance that would complicate binary modelling.
+
+
+```{r}
+#| label: fig-num-dist
+#| fig-cap: "Distribution of continuous variables: activating factor (AF, left) and age (right). AF ranges from 26.0 to 96.0 (mean = 61.8, SD = 19.5) and is approximately uniformly distributed with no severe skew. Age ranges from 25 to 45 years (mean = 34.0, SD = 6.25) with two observations recoded from sentinel value -99 to missing prior to plotting."
+
+# DISTRIBUTION PLOTS: CONTINUOUS VARIABLES
+p_af <- ggplot(df_fitfr, aes(x = AF)) +
+  geom_histogram(bins = 30, fill = "#0D7680", alpha = 0.8, colour = "white") +
+  geom_density(aes(y = after_stat(count)), colour = "gray30", linewidth = 0.7) +
+  labs(title = "Activating Factor (AF)", x = "AF", y = "Count") +
+  theme_bw(base_size = 10) +
+  theme(
+    plot.title       = element_text(size = 10),
+    axis.text        = element_text(size = 9),
+    axis.title       = element_text(size = 9),
+    panel.grid.minor = element_blank()
+  )
+
+p_age <- ggplot(df_fitfr |> filter(!is.na(age)), aes(x = age)) +
+  geom_histogram(bins = 20, fill = "#A06030", alpha = 0.8, colour = "white") +
+  geom_density(aes(y = after_stat(count)), colour = "gray30", linewidth = 0.7) +
+  labs(title = "Age", x = "Age (years)", y = "Count") +
+  theme_bw(base_size = 10) +
+  theme(
+    plot.title       = element_text(size = 10),
+    axis.text        = element_text(size = 9),
+    axis.title       = element_text(size = 9),
+    panel.grid.minor = element_blank()
+  )
+
+p_af + p_age +
+  plot_annotation(
+    title    = "Distribution of Continuous Variables",
+    subtitle = "Dark Gary curve = density estimate",
+    theme    = theme(
+      plot.title    = element_text(hjust = 0, face = "bold", size = 11),
+      plot.subtitle = element_text(hjust = 0, size = 9, colour = "grey50")
+    )
+  )
+
+```
+
+```{r}
+#| label: fig-cat-dist
+#| fig-cap: "Distribution of categorical variables: treatment group (left), sex (centre), and PR outcome (right). Treatment group C has the largest number of participants (n = 45), followed by A (n = 33) and B (n = 32). Sex is evenly split (Female: n = 55, Male: n = 55). PR outcome is approximately balanced (no: n = 54, yes: n = 56), indicating no class imbalance for binary modelling."
+
+# DISTRIBUTION PLOTS: CATEGORICAL VARIABLES
+p_treat <- ggplot(df_fitfr, aes(x = treatment, fill = treatment)) +
+  geom_bar(alpha = 0.85) +
+  geom_text(stat = "count", aes(label = after_stat(count)), vjust = -0.5, size = 3) +
+  scale_fill_manual(values = trt_colours) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  labs(title = "Treatment", x = "Treatment group", y = "Count") +
+  theme_bw(base_size = 10) +
+  theme(
+    plot.title       = element_text(size = 10),
+    axis.text        = element_text(size = 9),
+    axis.title       = element_text(size = 9),
+    panel.grid.minor = element_blank(),
+    legend.position  = "none"
+  )
+
+p_sex <- ggplot(df_fitfr, aes(x = sex, fill = sex)) +
+  geom_bar(alpha = 0.85) +
+  geom_text(stat = "count", aes(label = after_stat(count)), vjust = -0.5, size = 3) +
+  scale_fill_manual(values = c(Female = "#7FB3C8", Male = "#4A7FA5")) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  labs(title = "Sex", x = "Sex", y = "Count") +
+  theme_bw(base_size = 10) +
+  theme(
+    plot.title       = element_text(size = 10),
+    axis.text        = element_text(size = 9),
+    axis.title       = element_text(size = 9),
+    panel.grid.minor = element_blank(),
+    legend.position  = "none"
+  )
+
+p_pr <- ggplot(df_fitfr, aes(x = PR, fill = PR)) +
+  geom_bar(alpha = 0.85) +
+  geom_text(stat = "count", aes(label = after_stat(count)), vjust = -0.5, size = 3) +
+  scale_fill_manual(values = c(no = "#B0C4CC", yes = "#0D7680")) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  labs(title = "PR Outcome", x = "PR", y = "Count") +
+  theme_bw(base_size = 10) +
+  theme(
+    plot.title       = element_text(size = 10),
+    axis.text        = element_text(size = 9),
+    axis.title       = element_text(size = 9),
+    panel.grid.minor = element_blank(),
+    legend.position  = "none"
+  )
+
+p_treat + p_sex + p_pr +
+  plot_annotation(
+    title = "Distribution of Categorical Variables",
+    subtitle = "Numbers above bars indicate participant counts",
+    theme = theme(
+      plot.title = element_text(hjust = 0, face = "bold", size = 11),
+      plot.subtitle = element_text(hjust = 0, size = 9, colour = "grey50")
+    )
+  )
+
+```
+
+## Primary Relationships
+
+The association between treatment group and AF is displayed in @fig-af-treatment. AF differed substantially across the three groups (Kruskal-Wallis p < 0.001), with group A showing a markedly lower median AF of approximately 37 compared to approximately 78 for group B and 68 for group C. The interquartile ranges of group A and the other two groups did not overlap, and the within-group spread was considerably narrower for group A, together suggesting a strong and consistent treatment effect on AF. The unadjusted PR rates also varied across groups (@fig-pr-treatment): group B had the highest positive response rate at 62%, followed by group A at 52% and group C at 42%. This difference did not reach statistical significance at the 5% level (chi-squared p = 0.084), and the pattern — group C having the second highest AF but the lowest PR rate — suggests the relationship between treatment, AF, and PR is not straightforward.
+
+```{r}
+#| label: fig-af-treatment
+#| fig-cap: "Boxplot showing the activating factor (AF) by treatment group (A, B, C) among 110 participants. Boxes show the interquartile range, horizontal line in box shows the median, and diamonds indicate the mean for each group. Treatment group A has a markedly lower AF (median ~37) compared to groups B (median ~78) and C (median ~68) and their interquartile ranges do not overlap, suggesting a strong treatment effect. Kruskal-Wallis p < 0.001."
+
+# PRIMARY RELATIONSHIPS: TREATMENT VS OUTCOMES
+p_treat_af <- ggplot(df_fitfr, aes(x = treatment, y = AF, fill = treatment)) +
+  geom_boxplot(alpha = 0.8, outlier.shape = 21, width = 0.5) +
+  stat_summary(fun = mean, geom = "point", shape = 23,
+               size = 3, fill = "white", colour = "black") +
+  stat_summary(
+    fun      = median,
+    geom     = "text",
+    aes(label = round(after_stat(y), 1)),
+    vjust    = -2.5,
+    size     = 3,
+    fontface = "bold"
+  ) +
+  scale_fill_manual(values = trt_colours) +
+  labs(
+    title    = "AF by Treatment Group",
+    subtitle = "Diamond = group mean  ·  Kruskal-Wallis p < 0.001",
+    x        = "Treatment group",
+    y        = "Activating Factor (AF)"
+  ) +
+  theme_bw(base_size = 10) +
+  theme(
+    plot.title       = element_text(face = "bold", size = 11, hjust = 0),
+    plot.subtitle    = element_text(size = 9, colour = "grey50", hjust = 0),
+    axis.text        = element_text(size = 9),
+    axis.title       = element_text(size = 9),
+    panel.grid.minor = element_blank(),
+    legend.position  = "none"
+  )
+p_treat_af
+
+```
+
+```{r}
+#| label: fig-pr-treatment
+#| fig-cap: "Unadjusted PR rate by treatment group for 110 participants. Bar height represents the proportion of participants with PR = yes or PR = no within each treatment group. Group B had the highest positive response rate (62%), followed by group A (52%) and group C (42%). The difference across groups did not reach statistical significance (chi-squared p = 0.084)."
+
+p_treat_pr <- df_fitfr |>
+  filter(!is.na(PR)) |>
+  group_by(treatment, PR) |>
+  summarise(n = n(), .groups = "drop") |>
+  mutate(prop = n / sum(n), .by = treatment) |>
+  ggplot(aes(x = treatment, y = prop, fill = PR)) +
+  geom_col(position = "dodge", alpha = 0.85, width = 0.6) +
+  geom_text(aes(label = percent(prop, accuracy = 1)),
+            position = position_dodge(0.6), vjust = -0.4, size = 3) +
+  scale_fill_manual(values = c(no = "#B0C4CC", yes = "#0D7680"),
+                    labels = c("PR: No", "PR: Yes")) +
+  scale_y_continuous(labels = percent, limits = c(0, 0.85)) +
+  labs(
+    title    = "PR Rate by Treatment Group",
+    subtitle = "B: 65.5%  ·  A: 53.1%  ·  C: 38.5%  ·  chi-squared p = 0.084",
+    x        = "Treatment group",
+    y        = "Proportion",
+    fill     = NULL
+  ) +
+  theme_bw(base_size = 10) +
+  theme(
+    plot.title       = element_text(face = "bold", size = 11, hjust = 0),
+    plot.subtitle    = element_text(size = 9, colour = "grey50", hjust = 0),
+    axis.text        = element_text(size = 9),
+    axis.title       = element_text(size = 9),
+    panel.grid.minor = element_blank(),
+    legend.position  = "bottom",
+    legend.text      = element_text(size = 9)
+  )
+p_treat_pr
+
+```
+
+The association between age and both outcomes is shown in @fig-age-outcomes. A positive linear trend was observed between age and AF, with older participants tending to have higher AF values; however, considerable scatter around the regression line reflected the dominant influence of treatment group. The relationship between age and PR was more striking: participants with `PR = yes` had a substantially higher median age of approximately 40 years compared to approximately 29 years for those without, with minimal overlap between the two interquartile ranges. This pattern strongly suggested that age was likely to confound the apparent treatment effect on PR, and motivated its inclusion as a covariate in all formal models.
+
+```{r}
+#| label: fig-age-outcomes
+#| fig-cap: "Association between age and the two outcomes of interest. Left: scatterplot of AF against age, showing a positive linear trend with the orange shaded region representing the 95% confidence band. Considerable scatter reflects the strong influence of treatment group on AF. Right: boxplot of age by PR outcome, showing that participants with PR = yes had a substantially higher median age (40 years) compared to those with PR = no (29 years), with minimal overlap between interquartile ranges."
+
+# PRIMARY RELATIONSHIPS: AGE VS OUTCOMES
+p_age_af <- ggplot(df_fitfr, aes(x = age, y = AF)) +
+  geom_point(alpha = 0.45, colour = "#0D7680", size = 1.5) +
+  geom_smooth(method = "lm", se = TRUE, colour = "#E8A838",
+              fill = "#E8A838", alpha = 0.15, linewidth = 0.8) +
+  labs(
+    title = "Age vs AF",
+    x     = "Age (years)",
+    y     = "Activating Factor (AF)"
+  ) +
+  theme_bw(base_size = 10) +
+  theme(
+    plot.title       = element_text(size = 10, hjust = 0),
+    axis.text        = element_text(size = 9),
+    axis.title       = element_text(size = 9),
+    panel.grid.minor = element_blank()
+  )
+
+p_age_pr <- ggplot(df_fitfr |> filter(!is.na(PR)), aes(x = PR, y = age, fill = PR)) +
+  geom_boxplot(alpha = 0.8, width = 0.45) +
+  stat_summary(
+    fun      = median,
+    geom     = "text",
+    aes(label = round(after_stat(y), 1)),
+    vjust    = -0.5,
+    size     = 3,
+    fontface = "bold"
+  ) +
+  scale_fill_manual(values = c(no = "#B0C4CC", yes = "#0D7680")) +
+  labs(
+    title = "Age by PR Outcome",
+    x     = "PR outcome",
+    y     = "Age (years)"
+  ) +
+  theme_bw(base_size = 10) +
+  theme(
+    plot.title       = element_text(size = 10, hjust = 0),
+    axis.text        = element_text(size = 9),
+    axis.title       = element_text(size = 9),
+    panel.grid.minor = element_blank(),
+    legend.position  = "none"
+  )
+
+p_age_af + p_age_pr +
+  plot_annotation(
+    title = "Association Between Age and Outcomes",
+    subtitle = "Left: AF increases with age  ·  Right: PR = yes associated with older age",
+    theme = theme(
+      plot.title    = element_text(hjust = 0, face = "bold", size = 11),
+      plot.subtitle = element_text(hjust = 0, size = 9, colour = "grey50")
+    )
+  )
+
+```
+
+@fig-sex-outcomes displays the association between sex and both outcomes. AF distributions were similar between females and males, with median values of 59.0 and 63.6 respectively and substantially overlapping interquartile ranges. PR rates were virtually identical between the two sexes at 51.0% in both groups, confirming no meaningful association between sex and either outcome. Sex was nonetheless retained in formal modelling for completeness, though it was not expected to contribute meaningfully to either model.
+
+```{r}
+#| label: fig-sex-outcomes
+#| fig-cap: "Association between sex and the two outcomes of interest. Left: boxplot of AF by sex, showing similar distributions between females (median = 59.0) and males (median = 63.6), with substantially overlapping interquartile ranges indicating no meaningful association between sex and AF. Right: PR rate by sex, showing virtually identical positive response rates in females (51.0%) and males (51.0%), indicating no association between sex and PR outcome."
+
+# PRIMARY RELATIONSHIPS: SEX VS OUTCOMES
+p_sex_af <- ggplot(df_fitfr, aes(x = sex, y = AF, fill = sex)) +
+  geom_boxplot(alpha = 0.8, width = 0.45) +
+  stat_summary(
+    fun      = median,
+    geom     = "text",
+    aes(label = round(after_stat(y), 1)),
+    vjust    = -0.5,
+    size     = 3,
+    fontface = "bold"
+  ) +
+  scale_fill_manual(values = c(Female = "#7FB3C8", Male = "#4A7FA5")) +
+  labs(
+    title = "AF by Sex",
+    x     = "Sex",
+    y     = "Activating Factor (AF)"
+  ) +
+  theme_bw(base_size = 10) +
+  theme(
+    plot.title       = element_text(size = 10, hjust = 0),
+    axis.text        = element_text(size = 9),
+    axis.title       = element_text(size = 9),
+    panel.grid.minor = element_blank(),
+    legend.position  = "none"
+  )
+
+p_sex_pr <- df_fitfr |>
+  filter(!is.na(PR), !is.na(sex)) |>
+  group_by(sex, PR) |>
+  summarise(n = n(), .groups = "drop") |>
+  mutate(prop = n / sum(n), .by = sex) |>
+  ggplot(aes(x = sex, y = prop, fill = PR)) +
+  geom_col(position = "dodge", alpha = 0.85, width = 0.6) +
+  geom_text(aes(label = percent(prop, accuracy = 1)),
+            position = position_dodge(0.6), vjust = -0.4, size = 3) +
+  scale_fill_manual(values = c(no = "#B0C4CC", yes = "#0D7680"),
+                    labels = c("PR: No", "PR: Yes")) +
+  scale_y_continuous(labels = percent, limits = c(0, 0.75)) +
+  labs(
+    title = "PR Rate by Sex",
+    x     = "Sex",
+    y     = "Proportion",
+    fill  = NULL
+  ) +
+  theme_bw(base_size = 10) +
+  theme(
+    plot.title       = element_text(size = 10, hjust = 0),
+    axis.text        = element_text(size = 9),
+    axis.title       = element_text(size = 9),
+    panel.grid.minor = element_blank(),
+    legend.position  = c(0.8, 0.88),
+    legend.background = element_rect(fill = "white", colour = "grey80", linewidth = 0.3),
+    legend.text      = element_text(size = 8),
+    legend.key.size  = unit(0.4, "cm")
+  )
+
+p_sex_af + p_sex_pr +
+  plot_annotation(
+    title    = "Association Between Sex and Outcomes",
+    subtitle = "Sex shows no meaningful association with either AF or PR",
+    theme    = theme(
+      plot.title    = element_text(hjust = 0, face = "bold", size = 11),
+      plot.subtitle = element_text(hjust = 0, size = 9, colour = "grey50")
+    )
+  )
+
+```
+
+@fig-snp-outcomes summarises the exploratory SNP–outcome associations. Spearman correlations between SNP alternate allele dosage and AF were uniformly weak (largest: rs26922, r = −0.211). Heterogeneity of probability curves across dosage groups was noted for PR, though most SNPs showed only modest or inconsistent trends. No SNPs met the Bonferroni-corrected significance threshold of p < 0.001 for either outcome. This is not surprising given limited power across 51 independent tests with 110 study participants.
+
+```{r}
+#| label: fig-snp-outcomes
+#| fig-width: 9
+#| fig-cap: "SNP screening results for both outcomes. Left: top 10 SNPs associated with AF ranked by Spearman correlation, with rs26922 showing the strongest negative association (r = -0.211). Right: PR probability by alternate allele dosage for all SNPs, with the top 10 by maximum PR probability highlighted. All correlations are weak and no SNPs survived Bonferroni correction; findings are exploratory only."
+
+# PRIMARY RELATIONSHIPS: SNPS VS OUTCOMES
+snp_cols_clean <- names(df_fitfr)[str_detect(names(df_fitfr), "^rs")]
+
+snp_cor_af <- tibble(
+  SNP = snp_cols_clean,
+  r   = sapply(snp_cols_clean, function(s) {
+    cor(as.numeric(df_fitfr[[s]]), df_fitfr$AF, use = "complete.obs", method = "spearman")
+  })
+) |>
+  arrange(desc(abs(r))) |>
+  slice_head(n = 10) |>
+  mutate(
+    SNP       = fct_reorder(SNP, abs(r)),
+    direction = if_else(r > 0, "Positive", "Negative")
+  )
+
+p_snp_af <- ggplot(snp_cor_af, aes(x = abs(r), y = SNP, fill = direction)) +
+  geom_col(width = 0.65, alpha = 0.85) +
+  geom_text(aes(label = sprintf("r = %.3f", r)),
+            hjust = -0.1, size = 3) +
+  scale_fill_manual(values = c(Positive = "#0D7680", Negative = "#E8A838")) +
+  scale_x_continuous(limits = c(0, 0.55), expand = c(0, 0)) +
+  labs(
+    title = "Top 10 SNPs: AF",
+    x     = "|r| (Spearman)",
+    y     = NULL,
+    fill  = "Direction"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    plot.title       = element_text(size = 12, hjust = 0),
+    axis.text        = element_text(size = 11),
+    axis.title       = element_text(size = 11),
+    panel.grid.minor = element_blank(),
+    legend.position  = "right",
+    legend.text      = element_text(size = 10),
+    legend.title     = element_text(size = 11)
+  )
+
+snp_probs <- df_fitfr |>
+  select(PR, all_of(snp_cols_clean)) |>
+  pivot_longer(-PR, names_to = "SNP", values_to = "dosage") |>
+  filter(!is.na(dosage), !is.na(PR)) |>
+  group_by(SNP, dosage) |>
+  summarise(prob = mean(PR == "yes"), n = n(), .groups = "drop") |>
+  mutate(dosage = as.numeric(as.character(dosage)))
+
+top10_snps <- snp_probs |>
+  group_by(SNP) |>
+  summarise(max_prob = max(prob)) |>
+  arrange(desc(max_prob)) |>
+  slice_head(n = 10) |>
+  pull(SNP)
+
+p_snp_pr <- snp_probs |>
+  mutate(
+    highlight = if_else(SNP %in% top10_snps, SNP, "other"),
+    alpha_val = if_else(SNP %in% top10_snps, 1, 0.15),
+    lwd_val   = if_else(SNP %in% top10_snps, 1.1, 0.5)
+  ) |>
+  ggplot(aes(x = dosage, y = prob, group = SNP,
+             colour = highlight, alpha = alpha_val, linewidth = lwd_val)) +
+  geom_line() +
+  geom_point(data = ~ filter(., SNP %in% top10_snps),
+             aes(size = n), alpha = 1) +
+  scale_colour_manual(
+    values = c(setNames(scales::hue_pal()(10), top10_snps), other = "grey70"),
+    breaks = top10_snps
+  ) +
+  scale_alpha_identity() +
+  scale_linewidth_identity() +
+  scale_size_continuous(range = c(1, 4), guide = "none") +
+  scale_y_continuous(labels = percent, limits = c(0, 1)) +
+  scale_x_continuous(breaks = c(0, 1, 2),
+                     labels = c("0\n(hom ref)", "1\n(het)", "2\n(hom alt)")) +
+  labs(
+    title  = "All SNPs: PR",
+    x      = "Alternate Allele Dosage",
+    y      = "PR Probability",
+    colour = "Top 10 SNPs"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    plot.title       = element_text(size = 12, hjust = 0),
+    axis.text        = element_text(size = 11),
+    axis.title       = element_text(size = 11),
+    panel.grid.minor = element_blank(),
+    legend.position  = "right",
+    legend.text      = element_text(size = 10),
+    legend.title     = element_text(size = 11)
+  )
+
+p_snp_af + p_snp_pr +
+  plot_annotation(
+    title    = "Association Between SNPs and Outcomes",
+    subtitle = "Left: association with AF  ·  Right: PR probability by dosage",
+    theme    = theme(
+      plot.title    = element_text(hjust = 0, face = "bold", size = 15),
+      plot.subtitle = element_text(hjust = 0, size = 12, colour = "grey50")
+    )
+  )
+
+```
+
+## SNP Screening
+
+To identify candidate genetic predictors for inclusion in the multivariable models, univariable regression screening was conducted separately for AF and PR across all 51 SNPs. Linear regression was used for AF and logistic regression for PR. As anticipated given the small sample size, no SNPs survived the Bonferroni-corrected threshold for either outcome.
+
+```{r include=FALSE}
+# SCREENING SNP FOR AF MODEL
+snp_cols_model <- names(df_fitfr)[str_detect(names(df_fitfr), "^rs")]
+
+
+snp_screen_af <- tibble(
+  SNP  = snp_cols_model,
+  p    = sapply(snp_cols_model, function(s) {
+    summary(lm(AF ~ as.numeric(df_fitfr[[s]]), data = df_fitfr))$coefficients[2, 4]
+  }),
+  beta = sapply(snp_cols_model, function(s) {
+    coef(lm(AF ~ as.numeric(df_fitfr[[s]]), data = df_fitfr))[2]
+  })
+) |>
+  arrange(p) |>
+  mutate(bonferroni = p < 0.05 / n(),          # Bonferroni-corrected threshold
+         nominal    = p < 0.05)
+
+cat("SNPs passing Bonferroni threshold (AF):", sum(snp_screen_af$bonferroni), "\n")
+cat("SNPs passing nominal p < 0.05 (AF):",    sum(snp_screen_af$nominal),    "\n")
+print(head(snp_screen_af, 10))
+```
+
+Applying the nominal threshold of p < 0.05 as a more lenient criterion, two SNPs were retained for AF and one for PR. For AF, rs26922 and rs19486 both passed the nominal threshold (rs26922: β = −5.979, p = 0.025; rs19486: β = −4.703, p = 0.046), indicating that each additional alternate allele was associated with a decrease in AF on average (@tbl-snp-screen-af). For PR, rs91154 passed the nominal threshold with OR = 0.458 and p = 0.010, suggesting that each additional alternate allele was associated with lower odds of a positive response (@tbl-snp-screen-pr). All findings were consistent with the EDA and these SNPs were carried forward into the multivariable models as exploratory candidates, with all SNP-related findings treated as preliminary.
+
+```{r}
+#| label: tbl-snp-screen-af
+
+snp_screen_af |>
+  slice_head(n = 10) |>
+  mutate(
+    beta = round(beta, 3),
+    p    = formatC(p, format = "f", digits = 4),
+    bonferroni = if_else(bonferroni, "Yes", "No"),
+    nominal    = if_else(nominal,    "Yes", "No")
+  ) |>
+  select(SNP, beta, p, `Bonferroni (p<0.001)` = bonferroni, 
+         `Nominal (p<0.05)` = nominal) |>
+  kable(align = "lrrrr",
+        caption = "Top 10 SNPs from univariable linear regression screening for AF, 
+ranked by p-value. β represents the change in AF per additional alternate allele. 
+No SNPs survived Bonferroni correction (p < 0.001); rs26922 and rs19486 passed the 
+nominal threshold (p < 0.05) and were carried forward as candidate predictors.") |>
+  kable_styling(bootstrap_options = c("striped", "condensed"),
+                full_width = FALSE) |>
+  row_spec(which(snp_screen_af$nominal[1:10]), bold = TRUE)
+
+```
+
+```{r include=FALSE}
+# SCREENING SNP FOR PR MODEL
+pr_num <- as.numeric(df_fitfr$PR) - 1   # recode to 0/1
+
+snp_screen_pr <- tibble(
+  SNP  = snp_cols_model,
+  p    = sapply(snp_cols_model, function(s) {
+    summary(glm(pr_num ~ as.numeric(df_fitfr[[s]]),
+                family = binomial))$coefficients[2, 4]
+  }),
+  OR   = sapply(snp_cols_model, function(s) {
+    exp(coef(glm(pr_num ~ as.numeric(df_fitfr[[s]]),
+                 family = binomial))[2])
+  })
+) |>
+  arrange(p) |>
+  mutate(bonferroni = p < 0.05 / n(),
+         nominal    = p < 0.05)
+
+cat("\nSNPs passing Bonferroni threshold (PR):", sum(snp_screen_pr$bonferroni), "\n")
+cat("SNPs passing nominal p < 0.05 (PR):",    sum(snp_screen_pr$nominal),    "\n")
+print(head(snp_screen_pr, 10))
+
+top_snps_af <- snp_screen_af |> filter(nominal) |> pull(SNP)
+top_snps_pr <- snp_screen_pr |> filter(nominal) |> pull(SNP)
+
+cat("Top AF SNP candidates:", paste(top_snps_af, collapse = ", "), "\n")
+cat("Top PR SNP candidates:", paste(top_snps_pr, collapse = ", "), "\n")
+
+```
+
+```{r}
+#| label: tbl-snp-screen-pr
+snp_screen_pr |>
+  slice_head(n = 10) |>
+  mutate(
+    OR   = round(OR, 3),
+    p    = formatC(p, format = "f", digits = 4),
+    bonferroni = if_else(bonferroni, "Yes", "No"),
+    nominal    = if_else(nominal,    "Yes", "No")
+  ) |>
+  select(SNP, OR, p, `Bonferroni (p<0.001)` = bonferroni, `Nominal (p<0.05)` = nominal) |>
+  kable(align = "lrrrr",
+        caption = "Top 10 SNPs from univariable logistic regression screening for PR, 
+        ranked by p-value. OR represents the change in odds of PR per additional alternate 
+        allele. No SNPs survived Bonferroni correction (p < 0.001); rs91154 passed the 
+        nominal threshold (p < 0.05) and was carried forward as a candidate predictor.") |>
+  kable_styling(bootstrap_options = c("striped", "condensed"),
+                full_width = FALSE) |>
+  row_spec(which(snp_screen_pr$nominal[1:10]), bold = TRUE)
+
+```
+
+## AF Model
+
+Three nested linear regression models were fitted for AF and compared using AIC and adjusted R² (@tbl-af-model-compare1), with formal nested model testing via ANOVA (@tbl-af-model-compare2). The treatment-only baseline model explained 67.7% of variance in AF, confirming that treatment group was a strong predictor on its own. Adding age and sex as covariates produced a dramatic improvement in model fit, with adjusted R² increasing to 0.977 and AIC decreasing by approximately 284 units (ANOVA p < 0.001), indicating that age in particular explained a substantial proportion of the residual variance left unexplained by treatment alone. The subsequent addition of rs26922 and rs19486 yielded no meaningful further improvement (ΔAIC = +3.1, ANOVA p = 0.633), suggesting that these SNPs contribute negligible additional explanatory value once treatment and age are accounted for. The main-effects model comprising treatment, age, and sex was therefore selected as the final AF model.
+
+```{r}
+#| label: af-model-fit
+
+# AF MODEL
+df_model <- df_fitfr |> drop_na(age)
+
+lm_af_base <- lm(AF ~ treatment,             data = df_model)
+lm_af_main <- lm(AF ~ treatment + age + sex, data = df_model)
+
+if (length(top_snps_af) > 0) {
+  snp_terms_af <- paste(sprintf(top_snps_af), collapse = " + ")
+  lm_af_snp <- lm(as.formula(paste("AF ~ treatment + age + sex +", snp_terms_af)), 
+                  data = df_model)
+} else {
+  lm_af_snp <- lm_af_main
+}
+
+```
+
+```{r}
+#| label: tbl-af-model-compare1
+tibble(
+  Model    = c("Treatment only", "Main effects", "Main + SNPs"),
+  AIC      = c(AIC(lm_af_base), AIC(lm_af_main), AIC(lm_af_snp)),
+  `Adj. R²` = c(
+    summary(lm_af_base)$adj.r.squared,
+    summary(lm_af_main)$adj.r.squared,
+    summary(lm_af_snp)$adj.r.squared
+  )
+) |>
+  mutate(across(where(is.numeric), ~ round(.x, 3))) |>
+  kable(caption = "The table shows the comparison of three nested linear regression 
+        models for AF. The bolded row is the selected model. AIC is the Akaike 
+        Information Criterion where lower numbers denote a better fit. Adj. R² 
+        is the percent of variance in AF explained by the model.") |>
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE) |>
+  row_spec(2, bold = TRUE)
+
+```
+
+```{r}
+#| label: tbl-af-model-compare2
+anova(lm_af_base, lm_af_main, lm_af_snp) |>
+  tidy() |>
+  mutate(across(where(is.numeric), ~ round(.x, 3))) |>
+  kable(caption = "ANOVA nested model comparison for AF. Tests whether each additional 
+        set of predictors significantly improves model fit over the previous model. 
+        Res.Df: residual degrees of freedom; RSS: residual sum of squares; p-value: 
+        F-test for improvement.") |>
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+
+```
+
+The coefficient estimates from the selected model are presented in @tbl-af-model-summary. After adjusting for age and sex, treatment B was associated with an AF value 35.4 units higher than treatment A (95% CI: 33.9 to 36.9, p < 0.001), and treatment C was associated with a value 34.5 units higher than A (95% CI: 33.2 to 35.9, p < 0.001). The magnitude and precision of these estimates confirm a clinically meaningful and statistically robust treatment effect that persists after covariate adjustment. Age was also strongly associated with AF, with each additional year corresponding to a 1.70-unit increase (95% CI: 1.60 to 1.79, p < 0.001). Sex had no meaningful effect on AF, with an estimated difference of 0.73 units that was far from statistical significance (95% CI: −0.42 to 1.88, p = 0.21). Overall, the model explained 97.7% of the variance in AF.
+
+```{r}
+#| label: tbl-af-model-summary
+
+tidy(lm_af_main, conf.int = TRUE) |>
+  filter(term != "(Intercept)") |>
+  mutate(
+    term = case_when(
+      term == "treatmentB" ~ "Treatment B vs A",
+      term == "treatmentC" ~ "Treatment C vs A",
+      term == "sexMale"    ~ "Sex (Male vs Female)",
+      .default = term
+    ),
+    across(c(estimate, conf.low, conf.high, std.error, statistic), ~ round(.x, 3)),
+    p.value = formatC(p.value, format = "f", digits = 4)
+  ) |>
+  select(Term = term, beta = estimate, SE = std.error,
+         `95% CI low` = conf.low, `95% CI high` = conf.high,
+         t = statistic, p = p.value) |>
+  kable(caption = "Coefficient estimates from the selected AF linear regression model
+(treatment + age + sex, n = 108, adj. R² = 0.977). Treatment A is the reference
+group. beta: estimated change in AF per unit increase; SE: standard error; 
+95% CI: confidence interval; t: t-statistic; p: two-sided p-value.") |>
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+
+```
+
+## PR Model
+
+Three nested logistic regression models were fitted for PR and compared using AIC and McFadden's pseudo-R² (@tbl-pr-model-compare1), with formal nested model testing via likelihood ratio tests (@tbl-pr-model-compare2). The treatment-only baseline model had a McFadden R² of 0.016, suggesting that treatment group alone explained very little of the variation in PR outcome. Adding age and sex resulted in a substantial improvement in model fit (ΔMcFadden R² = 0.298, ΔAIC = −38.2; LRT p < 0.001), consistent with age explaining most of the PR variation. The addition of rs91154 to this model improved fit by 2.08 AIC units (LRT p = 0.048) and was therefore not retained given the additional complexity of the model and failure of the SNP to pass Bonferroni correction. The main-effects model containing treatment group, age and sex was therefore selected as the final PR model.
+
+```{r}
+#| label: pr-model-fit
+
+# PR MODEL
+glm_pr_base <- glm(PR ~ treatment,             data = df_model, family = binomial)
+glm_pr_main <- glm(PR ~ treatment + age + sex, data = df_model, family = binomial)
+
+if (length(top_snps_pr) > 0) {
+  snp_terms_pr <- paste(sprintf(top_snps_pr), collapse = " + ")
+  glm_pr_snp <- glm(as.formula(paste("PR ~ treatment + age + sex +", snp_terms_pr)),
+                    data = df_model, family = binomial)
+} else {
+  glm_pr_snp <- glm_pr_main
+}
+
+```
+
+```{r}
+#| label: tbl-pr-model-compare1
+mcfadden_r2 <- function(model) {
+  1 - (logLik(model) / logLik(update(model, . ~ 1)))
+}
+
+tibble(
+  Model        = c("Treatment only", "Main effects", "Main + SNPs"),
+  AIC          = c(AIC(glm_pr_base), AIC(glm_pr_main), AIC(glm_pr_snp)),
+  `McFadden R²` = c(
+    as.numeric(mcfadden_r2(glm_pr_base)),
+    as.numeric(mcfadden_r2(glm_pr_main)),
+    as.numeric(mcfadden_r2(glm_pr_snp))
+  )
+) |>
+  mutate(across(where(is.numeric), ~ round(.x, 3))) |>
+  kable(caption = "Table comparing three nested logistic regression models for PR. 
+        Boldface row indicates model chosen. AIC: Akaike Information Criterion; McFadden 
+        R²: pseudo-R² measures improvement compared to a null intercept-only model.") |>
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE) |>
+  row_spec(2, bold = TRUE)
+
+```
+
+```{r}
+#| label: tbl-pr-model-compare2
+anova(glm_pr_base, glm_pr_main, glm_pr_snp, test = "LRT") |>
+  tidy() |>
+  mutate(across(where(is.numeric), ~ round(.x, 3))) |>
+  kable(caption = "Likelihood ratio test for nested PR logistic regression models. 
+        Tests whether adding each additional set of predictors significantly improves 
+        model fit. Df: degrees of freedom added; Deviance: decrease in residual 
+        deviance; p-value: chi-squared test of improvement.") |>
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+Odds ratios estimated from the selected model are shown in @tbl-pr-model-summary. Age was by far the strongest predictor of PR. For every additional year of age, there was a 1.30 times greater odds of having a positive response (95% CI: 1.19 to 1.44, p < 0.001). Neither treatment B nor treatment C had significantly different odds of PR compared to treatment A after adjusting for age and sex — the estimated odds ratios were 1.139 (95% CI: 0.33 to 3.89, p = 0.83) and 0.897 (95% CI: 0.29 to 2.81, p = 0.85) respectively. This is in contrast to the unadjusted positive response rates we observed in EDA, where group B had a higher rate of positive response compared to group C. The attenuation of this effect upon adjustment for age strongly suggests that the apparent treatment effect on PR was driven by confounding from age rather than a true treatment effect. Sex was not meaningfully associated with PR (OR = 0.463, 95% CI: 0.16 to 1.24, p = 0.14).
+
+```{r}
+#| label: tbl-pr-model-summary
+tidy(glm_pr_main, conf.int = TRUE, exponentiate = TRUE) |>
+  filter(term != "(Intercept)") |>
+  mutate(
+    term = case_when(
+      term == "treatmentB" ~ "Treatment B vs A",
+      term == "treatmentC" ~ "Treatment C vs A",
+      term == "sexMale"    ~ "Sex (Male vs Female)",
+      .default = term
+    ),
+    across(c(estimate, conf.low, conf.high), ~ round(.x, 3)),
+    p.value = formatC(p.value, format = "f", digits = 4)
+  ) |>
+  select(Term = term, OR = estimate,
+         `95% CI low` = conf.low, `95% CI high` = conf.high,
+         p = p.value) |>
+  kable(caption = "Odds Ratios from Fitted PR Logistic Regression Model 
+(Treatment + Age + Sex, n = 108). Treatment A is reference group. Bold row 
+indicates dominant predictor. OR = odds ratio (exponentiated log-odds coefficient
+); 95% CI = confidence interval; p = two-sided Wald test p-value.") |>
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE) |>
+  row_spec(3, bold = TRUE)
+
+```
+
+## Assumption Checking
+
+Diagnostic checks were conducted for both the AF linear regression model and the PR logistic regression model to assess whether key modelling assumptions were satisfied.
+
+The four residual diagnostic plots for the AF model are presented in @fig-af-diagnostics. There was a slight U-shaped trend in residuals vs fitted, indicating a slight departure from linearity, and variance wasn't completely constant over the range of fitted values. The points were reasonably close to the line in the Q-Q plot, except for slight deviations in the tails. So, normality was roughly met. Cook's distance flagged three potentially influential observations (IDs 53, 78, and 85). They should be checked for data entry mistakes, but should not be removed unless there is a good reason to do so. The VIFs for all predictors were near 1 (@tbl-af-diagnostics), indicating that there wasn't any substantial multicollinearity between treatment, age, and sex.
+
+```{r}
+#| label: fig-af-diagnostics
+#| fig-cap: "Diagnostic plots from linear regression of the chosen AF model (treatment + age + sex, n = 108). The residuals versus fitted plot displays mild U-shape indicating slight non-linearity; the Q-Q plot is reasonable aside from some deviations in the tails; Cook's distance identifies observations 53, 78, and 85 as possibly influential."
+#| fig-height: 6
+#| fig-width: 8
+
+par(mfrow = c(2, 2))
+plot(lm_af_main, which = 1:4)
+par(mfrow = c(1, 1))
+```
+
+```{r}
+#| label: tbl-af-diagnostics
+#| tbl-cap: "Variance inflation factors (VIF) associated with the final AF linear regression model. GVIF^(1/2Df) values near 1 suggest that there is no substantial multicollinearity between predictors. Values >2.5 would indicate potential concern."
+
+vif_af <- vif(lm_af_main)
+
+tibble(
+  Predictor = names(vif_af[, 1]),
+  `GVIF^(1/2Df)` = round(vif_af[, 3], 3)
+) |>
+  kable(booktabs = TRUE) |>
+  kable_styling(latex_options = "hold_position", full_width = FALSE)
+```
+
+Diagnostic results for the PR logistic regression model are summarised in @tbl-pr-diagnostics and @fig-pr-cooks. The Box-Tidwell procedure produced a marginally significant coefficient for the interaction term with age ($\beta$ = 1.572, p = 0.029). There may therefore be some non-linearity between age and log odds of PR; however with the small sample size, the priority here is assessing whether the assumption is violated rather than interpreting the magnitude of the interaction. Tabulations of treatment and sex against PR revealed there were no zero cells (minimum cell n = 12), so complete separation was ruled out, as was quasi-complete separation. The Hosmer-Lemeshow test was not significant ($\chi^2$ = 9.37, df = 8, p = 0.312), suggesting the model did not do a significantly poor job of predicting observed outcome frequencies within deciles of predicted probability. VIF were near 1 for all predictor terms, so multicollinearity was not present. 
+
+```{r}
+#| label: tbl-pr-diagnostics
+#| tbl-cap: "Diagnostics for the chosen PR logistic regression model (treatment + age + sex; n=108). Box-Tidwell tests linearity of age with respect to log-odds of PR; Hosmer-Lemeshow tests overall fit across deciles of predicted probability; VIF tests for multicollinearity."
+
+# Box-Tidwell
+df_bt <- df_fitfr |>
+  filter(!is.na(age), !is.na(sex)) |>
+  mutate(age_log_age = age * log(age))
+glm_bt  <- glm(PR ~ treatment + age + sex + age_log_age, data = df_bt, family = binomial)
+bt_coef <- tidy(glm_bt) |> filter(term == "age_log_age")
+
+# Hosmer-Lemeshow
+hl_test <- hoslem.test(x = glm_pr_main$y, y = fitted(glm_pr_main), g = 10)
+
+# VIF
+vif_pr <- vif(glm_pr_main)
+
+# Separation (min cell)
+min_cell <- min(table(df_fitfr$treatment, df_fitfr$PR),
+                table(df_fitfr$sex,       df_fitfr$PR))
+
+tibble(
+  Check = c("Box-Tidwell (age linearity)",
+            "Hosmer-Lemeshow goodness-of-fit",
+            "Complete separation",
+            "VIF: treatment", "VIF: age", "VIF: sex"),
+  Result = c(
+    sprintf("beta = %.3f, p = %.3f", bt_coef$estimate, bt_coef$p.value),
+    sprintf("chi-squared = %.2f, df = %d, p = %.3f",
+            hl_test$statistic, hl_test$parameter, hl_test$p.value),
+    sprintf("No (min cell n = %d)", min_cell),
+    sprintf("%.3f", vif_pr[1, 3]),
+    sprintf("%.3f", vif_pr[2, 3]),
+    sprintf("%.3f", vif_pr[3, 3])
+  ),
+  Conclusion = c(
+    "Borderline; interpret with caution",
+    "Adequate fit",
+    "No separation",
+    "No multicollinearity",
+    "No multicollinearity",
+    "No multicollinearity"
+  )
+) |>
+  kable(booktabs = TRUE) |>
+  kable_styling(latex_options = c("hold_position", "scale_down"), full_width = FALSE)
+```
+
+```{r}
+#| label: fig-pr-cooks
+#| fig-cap: "Cook's distance of the PR logistic model (model contains treatment + age + sex, n = 108). Observations flagged with orange exceed the threshold of 4/n. Ten points are flagged (IDs: 16, 18, 40, 49, 57, 72, 82, 92, 99, 102). ID 82 has the highest value."
+#| fig-height: 4
+
+cooksd_pr    <- cooks.distance(glm_pr_main)
+influential_pr <- which(cooksd_pr > 4 / nrow(df_fitfr))
+
+tibble(obs = seq_along(cooksd_pr), cooksd = cooksd_pr,
+       flagged = cooksd_pr > 4 / nrow(df_fitfr)) |>
+  ggplot(aes(x = obs, y = cooksd, colour = flagged)) +
+  geom_segment(aes(xend = obs, yend = 0), linewidth = 0.5) +
+  geom_point(size = 2) +
+  geom_text(data = ~ filter(., flagged),
+            aes(label = obs), vjust = -0.6, size = 3, colour = "#E8A838") +
+  geom_hline(yintercept = 4 / nrow(df_fitfr), linetype = "dashed", colour = "grey40") +
+  scale_colour_manual(values = c(`FALSE` = "#0D7680", `TRUE` = "#E8A838"), 
+                      guide = "none") +
+  labs(x = "Observation index", y = "Cook's distance") +
+  theme_bw(base_size = 11) +
+  theme(panel.grid.minor = element_blank())
+```
+
+# Discussion
+
+This analysis tested if treatment group significantly affected AF and PR after adjusting for possible confounders age, sex, and genotype. The analysis found significant evidence of treatment affecting AF, but not conclusively for PR.
+
+Treatment group was a strong and statistically robust predictor of AF. Both B and C groups had markedly higher AF values than group A – by ~35.4 and 34.5 units respectively – and this effect remained after accounting for age and sex: the final model accounted for 97.7% of variance in AF. Age was also independently associated with AF: for every year older a participant was, their AF value went up by 1.70 units. Both treatment assignment and participant age appear to have useful effects on AF. Regression slopes did not significantly differ across treatment groups in the EDA, indicating that the effect of age was parallel across treatments (i.e. there was no interaction). Sex was not meaningfully involved in the model; this makes sense given that there was no marginal association with sex in the EDA.
+
+The results for PR were more nuanced. While treatment group B seems to have a higher PR rate than C in the unadjusted analysis (62% vs 42%), this did not reach conventional statistical significance (chi-squared p = 0.084). When controlling for age in the logistic regression model, the difference between B and C decreased substantially — neither B nor C were significantly different from A in the odds of PR. Age was by far the strongest predictor of PR — every additional year of age was associated with 1.30 times greater odds of PR. The unadjusted differences between treatment groups in PR from the EDA were therefore mostly due to confounding by age: members of group B just so happened to be older, on average, and older individuals were more likely to respond positively regardless of treatment assignment. When age was controlled for, treatment group was no longer associated with a statistically significant amount of the variability in PR.
+
+These genetic exploratory analyses were hypothesis-generating and should be interpreted very cautiously. No SNPs remained significant after Bonferroni correction for either outcome; this was not surprising given the modest statistical power with 110 individuals across 51 tests performed simultaneously. The nominally-significant candidates (rs26922 and rs19486 for AF, rs91154 for PR) explained trivial additional amounts of variation in these multivariable models after treatment and age, and none of these results should be believed until replicated in an independent sample.
+
+Several caveats to these findings are worth mentioning. Firstly, our sample size of n = 110 participants is quite small, affording us limited power. This is particularly true for the genetic analyses, and also for detecting small-to-moderate treatment effects on PR. The fact that treatment did not achieve significance for PR (p = 0.084, unadjusted) may be due to a true lack of effect, but could alternatively be due to insufficient power to detect a small to moderate sized effect. Secondly, our borderline Box-Tidwell result for the PR model (p = 0.029) indicates that there may be some non-linear relationship between age and log-odds of PR that is not being modelled by our logistic regression model. Including more flexible terms for age in the model (e.g. a quadratic age term, or splines) would be worthwhile in future analyses. Thirdly, our treatment groups were not well balanced for age, which is why we needed to adjust for it as a covariate. But this result also begs the question of whether our randomisation process was truly adequate. To the extent that age differs across groups due to systematic (non-random) allocation, residual confounding may remain after covariate adjustment. Finally, the SNP screening methodology employed here has an inflated false positive rate at the nominal alpha level, so any SNPs identified here should be considered hypothesis-generating rather than confirmatory.
+
+A larger sample size in future studies would permit more robust SNP screening using Bonferroni-corrected thresholds, increased power to examine treatment effects on PR, and allow more flexible modelling of the age–PR relationship. Validation of the rs26922, rs19486, and rs91154 associations in an independent cohort would also provide insight into whether these are true positive findings or false positives.
+
+\clearpage
+
+# Appendix
+
+```{r ref.label=knitr::all_labels()}
+#| eval: false
+#| echo: true
+```
+
+# References
+
+
